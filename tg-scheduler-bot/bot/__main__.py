@@ -44,7 +44,17 @@ def setup_logging(level: str) -> None:
 
 
 def build_application(config: Config) -> Application:
-    openai_client = AsyncOpenAI(api_key=config.openai_api_key)
+    # Адрес передаётся всегда: SDK сам читает OPENAI_BASE_URL из окружения,
+    # и пустая переменная там дала бы клиент с пустым адресом.
+    openai_client = AsyncOpenAI(
+        api_key=config.openai_api_key, base_url=config.openai_base_url
+    )
+    logger.info(
+        "Модели: разбор %s, распознавание %s (%s)",
+        config.openai_model,
+        config.openai_transcribe_model,
+        config.openai_base_url,
+    )
 
     google = GoogleCalendar(
         calendar_id=config.google_calendar_id,

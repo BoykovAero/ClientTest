@@ -19,6 +19,11 @@ from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# Адрес OpenAI по умолчанию. Задаётся явно, а не оставляется на усмотрение
+# SDK: тот сам читает переменную OPENAI_BASE_URL и при пустом значении
+# собирает клиент с пустым адресом.
+DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+
 
 class ConfigError(RuntimeError):
     """Конфигурация непригодна. Текст пойдёт в лог и в stderr при старте."""
@@ -30,6 +35,7 @@ class Config:
     allowed_user_id: int
 
     openai_api_key: str
+    openai_base_url: str
     openai_model: str
     openai_transcribe_model: str
 
@@ -166,6 +172,17 @@ def load_config(env_file: Path | None = None) -> Config:
     icloud_apple_id = _required("ICLOUD_APPLE_ID", missing)
     icloud_app_password = _required("ICLOUD_APP_PASSWORD", missing)
 
+    # Любой сервис с API, совместимым с OpenAI: сам OpenAI, Groq и прочие.
+    # Пустое значение приводится к адресу OpenAI здесь же, чтобы дальше в
+    # клиент всегда уходил непустой адрес.
+    openai_base_url = os.environ.get("OPENAI_BASE_URL", "").strip()
+    if not openai_base_url:
+        openai_base_url = DEFAULT_OPENAI_BASE_URL
+    elif not openai_base_url.startswith("https://"):
+        problems.append(
+            f"OPENAI_BASE_URL: ожидается адрес на https://, получено {openai_base_url!r}"
+        )
+
     timezone_name = os.environ.get("TIMEZONE", "Europe/Moscow").strip() or "Europe/Moscow"
     try:
         timezone = ZoneInfo(timezone_name)
@@ -229,6 +246,7 @@ def load_config(env_file: Path | None = None) -> Config:
         telegram_bot_token=telegram_bot_token,
         allowed_user_id=allowed_user_id,
         openai_api_key=openai_api_key,
+        openai_base_url=openai_base_url,
         openai_model=os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip(),
         openai_transcribe_model=os.environ.get("OPENAI_TRANSCRIBE_MODEL", "whisper-1").strip(),
         icloud_apple_id=icloud_apple_id,

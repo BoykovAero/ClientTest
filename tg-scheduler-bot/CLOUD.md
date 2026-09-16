@@ -26,11 +26,44 @@
 3. Открой своего нового бота и нажми `/start`. Без этого бот не сможет
    написать тебе первым.
 
-# Шаг 2. OpenAI
+# Шаг 2. Распознавание речи и разбор текста
+
+Боту нужны две вещи: перевести голосовое в текст и разобрать текст в список
+дел. Обе умеет любой сервис с API, совместимым с OpenAI. Вариантов два.
+
+## Вариант A — Groq: бесплатно, без карты
+
+1. [console.groq.com](https://console.groq.com/) → регистрация (карта не нужна).
+2. **API Keys** → **Create API Key** → имя `tg-scheduler-bot` → скопируй
+   ключ вида `gsk_...`, он показывается один раз.
+3. Переменные:
+
+```
+OPENAI_API_KEY=gsk_...
+OPENAI_BASE_URL=https://api.groq.com/openai/v1
+OPENAI_MODEL=llama-3.3-70b-versatile
+OPENAI_TRANSCRIBE_MODEL=whisper-large-v3-turbo
+```
+
+Бесплатный тариф Groq на момент написания — порядка 30 запросов в минуту и
+тысячи в сутки, ограничение на загрузку 25 МБ. Нагрузка этого бота — единицы
+запросов в день, то есть с огромным запасом. Лимиты меняются, сверь на сайте.
+
+## Вариант B — OpenAI: платно
 
 [platform.openai.com](https://platform.openai.com/) → **Settings → Billing**,
 пополни баланс (подписка ChatGPT Plus доступа к API не даёт) → **API keys →
-Create new secret key**. Ключ показывается один раз — это `OPENAI_API_KEY`.
+Create new secret key**.
+
+```
+OPENAI_API_KEY=sk-...
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_MODEL=gpt-4o-mini
+OPENAI_TRANSCRIBE_MODEL=whisper-1
+```
+
+> Переключиться между вариантами можно в любой момент: меняются четыре
+> переменные, код трогать не нужно.
 
 # Шаг 3. iCloud
 
@@ -115,6 +148,9 @@ App-Specific Passwords** → **+** → название `tg-scheduler-bot`.
 | `TELEGRAM_BOT_TOKEN` | из шага 1 |
 | `ALLOWED_USER_ID` | из шага 1 |
 | `OPENAI_API_KEY` | из шага 2 |
+| `OPENAI_BASE_URL` | из шага 2 |
+| `OPENAI_MODEL` | из шага 2 |
+| `OPENAI_TRANSCRIBE_MODEL` | из шага 2 |
 | `ICLOUD_APPLE_ID` | из шага 3 |
 | `ICLOUD_APP_PASSWORD` | из шага 3 |
 | `GOOGLE_SERVICE_ACCOUNT_JSON` | весь JSON из шага 4 |

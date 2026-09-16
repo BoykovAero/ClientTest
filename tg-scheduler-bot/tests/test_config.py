@@ -24,6 +24,7 @@ def env(monkeypatch, tmp_path: Path):
     """Чистое окружение с обязательными переменными и существующим token.json."""
     for name in list(REQUIRED) + [
         "OPENAI_MODEL",
+        "OPENAI_BASE_URL",
         "OPENAI_TRANSCRIBE_MODEL",
         "ICLOUD_CALDAV_URL",
         "ICLOUD_CALENDAR_NAME",
@@ -228,4 +229,25 @@ class TestServiceAccountAsBase64:
         monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_JSON", "совершенно не то")
         monkeypatch.setenv("GOOGLE_CALENDAR_ID", "me@gmail.com")
         with pytest.raises(ConfigError, match="base64"):
+            env()
+
+
+class TestOpenAIBaseUrl:
+    """Провайдер задаётся адресом: пусто — OpenAI, иначе совместимый сервис."""
+
+    def test_defaults_to_openai(self, env):
+        assert env().openai_base_url == "https://api.openai.com/v1"
+
+    def test_blank_value_becomes_openai(self, monkeypatch, env):
+        """SDK сам читает OPENAI_BASE_URL — пустая строка дала бы пустой адрес."""
+        monkeypatch.setenv("OPENAI_BASE_URL", "   ")
+        assert env().openai_base_url == "https://api.openai.com/v1"
+
+    def test_accepts_groq(self, monkeypatch, env):
+        monkeypatch.setenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1")
+        assert env().openai_base_url == "https://api.groq.com/openai/v1"
+
+    def test_rejects_non_https(self, monkeypatch, env):
+        monkeypatch.setenv("OPENAI_BASE_URL", "api.groq.com/openai/v1")
+        with pytest.raises(ConfigError, match="OPENAI_BASE_URL"):
             env()

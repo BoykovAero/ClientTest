@@ -132,22 +132,38 @@ def check_telegram_user(token: str, user_id: str) -> tuple[bool, str]:
     return False, description
 
 
+# Ключ узнаётся по префиксу: sk- у OpenAI, gsk_ у Groq. Отсюда же берётся
+# адрес, по которому его проверять.
+KEY_PREFIXES = {
+    "sk-": ("OpenAI", "https://api.openai.com/v1"),
+    "gsk_": ("Groq", "https://api.groq.com/openai/v1"),
+}
+
+
+def detect_provider(key: str) -> tuple[str, str] | tuple[None, None]:
+    for prefix, (name, base_url) in KEY_PREFIXES.items():
+        if key.startswith(prefix):
+            return name, base_url
+    return None, None
+
+
 def check_openai_key(key: str) -> tuple[bool, str]:
-    if not key.startswith("sk-"):
-        return False, "ключ OpenAI начинается с sk-"
+    name, base_url = detect_provider(key)
+    if name is None:
+        return False, "ключ должен начинаться с sk- (OpenAI) или gsk_ (Groq)"
     try:
         status, payload = _get_json(
-            "https://api.openai.com/v1/models", {"Authorization": f"Bearer {key}"}
+            f"{base_url}/models", {"Authorization": f"Bearer {key}"}
         )
     except Exception as exc:
-        return False, f"нет связи с OpenAI: {exc}"
+        return False, f"нет связи с {name}: {exc}"
     if status == 401:
-        return False, "OpenAI не принял ключ (401)"
+        return False, f"{name} не принял ключ (401)"
     if status == 429:
-        return False, "ключ принят, но исчерпана квота — пополни баланс (DEPLOY.md, шаг 2)"
+        return False, f"ключ принят, но исчерпана квота {name}"
     if status != 200:
-        return False, f"OpenAI ответил {status}"
-    return True, f"ключ рабочий, моделей доступно: {len(payload.get('data', []))}"
+        return False, f"{name} ответил {status}"
+    return True, f"{name}: ключ рабочий, моделей доступно: {len(payload.get('data', []))}"
 
 
 def check_icloud(apple_id: str, password: str, calendar_name: str) -> tuple[bool, str]:
@@ -231,12 +247,27 @@ def main() -> int:
 
     # 3. OpenAI
     values["OPENAI_API_KEY"] = ask(
-        "3/5. Ключ OpenAI", values.get("OPENAI_API_KEY", ""), True,
-        "platform.openai.com/api-keys -> Create new secret key. Баланс должен быть > 0",
+        "3/5. Ключ для распознавания и разбора",
+        values.get("OPENAI_API_KEY", ""), True,
+        "Groq (бесплатно): console.groq.com/keys, ключ gsk_...  |  "
+        "OpenAI (платно): platform.openai.com/api-keys, ключ sk-...",
     )
     passed, detail = check_openai_key(values["OPENAI_API_KEY"])
     (ok if passed else bad)(detail)
-    if not passed:
+    if passed:
+        # Адрес и модели подставляются под провайдера, чтобы не заставлять
+        # вспоминать их наизусть.
+        name, base_url = detect_provider(values["OPENAI_API_KEY"])
+        if name == "Groq":
+            values["OPENAI_BASE_URL"] = base_url
+            values["OPENAI_MODEL"] = "llama-3.3-70b-versatile"
+            values["OPENAI_TRANSCRIBE_MODEL"] = "whisper-large-v3-turbo"
+        else:
+            values["OPENAI_BASE_URL"] = ""
+            values["OPENAI_MODEL"] = "gpt-4o-mini"
+            values["OPENAI_TRANSCRIBE_MODEL"] = "whisper-1"
+        ok(f"модели: {values['OPENAI_MODEL']} и {values['OPENAI_TRANSCRIBE_MODEL']}")
+    else:
         failures.append("OPENAI_API_KEY")
 
     # 4. iCloud

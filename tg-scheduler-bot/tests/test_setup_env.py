@@ -83,3 +83,33 @@ class TestValidatorsRejectBadInputWithoutNetwork:
         passed, message = check_openai_key(key)
         assert not passed
         assert "sk-" in message
+
+
+class TestProviderDetection:
+    """Ключ узнаётся по префиксу, отсюда берутся адрес и модели."""
+
+    def test_openai_key(self):
+        from setup_env import detect_provider
+
+        name, base_url = detect_provider("sk-proj-abc123")
+        assert name == "OpenAI"
+        assert base_url == "https://api.openai.com/v1"
+
+    def test_groq_key(self):
+        from setup_env import detect_provider
+
+        name, base_url = detect_provider("gsk_abc123")
+        assert name == "Groq"
+        assert base_url == "https://api.groq.com/openai/v1"
+
+    def test_unknown_key(self):
+        from setup_env import detect_provider
+
+        assert detect_provider("просто-строка") == (None, None)
+
+    def test_validator_names_both_prefixes(self):
+        from setup_env import check_openai_key
+
+        passed, message = check_openai_key("непонятно-что")
+        assert not passed
+        assert "sk-" in message and "gsk_" in message
