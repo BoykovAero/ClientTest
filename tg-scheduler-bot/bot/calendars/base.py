@@ -16,6 +16,13 @@ from datetime import date, datetime, timedelta
 # в отличие от id, который в интерфейсе календаря не показывается.
 MARKER_PREFIX = "tg-scheduler-bot"
 
+# Перевод из стандартного алфавита base32 в base32hex. Готовая
+# base64.b32hexencode появилась только в Python 3.10, а macOS до сих пор
+# приносит с собой 3.9 — держим совместимость своими силами.
+_B32_TO_B32HEX = str.maketrans(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567", "0123456789ABCDEFGHIJKLMNOPQRSTUV"
+)
+
 
 class CalendarError(RuntimeError):
     """Календарь недоступен или отказал. Ловится на уровне хендлера."""
@@ -60,7 +67,8 @@ class Event:
             ]
         )
         digest = hashlib.sha1(key.encode("utf-8")).digest()
-        return base64.b32hexencode(digest).decode("ascii").lower().rstrip("=")
+        encoded = base64.b32encode(digest).decode("ascii").translate(_B32_TO_B32HEX)
+        return encoded.lower().rstrip("=")
 
     @property
     def marker(self) -> str:

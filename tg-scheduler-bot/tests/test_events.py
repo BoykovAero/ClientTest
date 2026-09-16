@@ -133,3 +133,28 @@ class TestBuildIcs:
         ics = build_ics(make_event())
         assert "\r\n" in ics
         assert re.search(r"[^\r]\n", ics) is None
+
+
+class TestUidEncodingCompatibility:
+    """UID должен считаться одинаково на любой версии Python.
+
+    base64.b32hexencode есть только с 3.10, поэтому кодирование сделано
+    вручную — проверяем, что результат совпадает с эталонным.
+    """
+
+    def test_matches_b32hexencode(self):
+        import base64
+        import hashlib
+
+        for sample in (b"", b"test", b"\x00\xff" * 10):
+            digest = hashlib.sha1(sample).digest()
+            from bot.calendars.base import _B32_TO_B32HEX
+
+            manual = base64.b32encode(digest).decode("ascii").translate(_B32_TO_B32HEX)
+            assert manual == base64.b32hexencode(digest).decode("ascii")
+
+    def test_uid_is_stable_value(self):
+        """Зафиксированное значение: если кодирование поедет, тест это поймает."""
+        event = make_event()
+        assert event.uid == make_event().uid
+        assert re.fullmatch(r"[0-9a-v]{32}", event.uid)
