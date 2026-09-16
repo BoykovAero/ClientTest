@@ -158,3 +158,29 @@ class TestUidEncodingCompatibility:
         event = make_event()
         assert event.uid == make_event().uid
         assert re.fullmatch(r"[0-9a-v]{32}", event.uid)
+
+
+class TestGoogleCalendarConstruction:
+    def test_requires_one_auth_source(self):
+        from bot.calendars.google import GoogleCalendar
+
+        with pytest.raises(ValueError, match="token_file.*service_account_info"):
+            GoogleCalendar(calendar_id="primary", timezone_name="Europe/Moscow")
+
+    def test_reports_which_mode_is_used(self, tmp_path):
+        from bot.calendars.google import GoogleCalendar
+
+        oauth = GoogleCalendar(
+            calendar_id="primary",
+            timezone_name="Europe/Moscow",
+            token_file=tmp_path / "token.json",
+        )
+        assert not oauth.uses_service_account
+
+        service = GoogleCalendar(
+            calendar_id="me@gmail.com",
+            timezone_name="Europe/Moscow",
+            service_account_info={"client_email": "bot@proj.iam.gserviceaccount.com"},
+        )
+        assert service.uses_service_account
+        assert service.service_account_email == "bot@proj.iam.gserviceaccount.com"

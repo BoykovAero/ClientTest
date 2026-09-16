@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import time
 from pathlib import Path
 
@@ -28,6 +29,8 @@ def env(monkeypatch, tmp_path: Path):
         "ICLOUD_CALENDAR_NAME",
         "GOOGLE_CREDENTIALS_FILE",
         "GOOGLE_TOKEN_FILE",
+        "GOOGLE_SERVICE_ACCOUNT_FILE",
+        "GOOGLE_SERVICE_ACCOUNT_JSON",
         "GOOGLE_CALENDAR_ID",
         "TIMEZONE",
         "DAILY_PROMPT_TIME",
@@ -117,4 +120,78 @@ class TestValidation:
     def test_negative_duration_rejected(self, monkeypatch, env):
         monkeypatch.setenv("DEFAULT_EVENT_MINUTES", "-30")
         with pytest.raises(ConfigError, match="DEFAULT_EVENT_MINUTES"):
+            env()
+
+
+class TestGoogleAuthMode:
+    """Доступ к Google: либо сервисный аккаунт, либо OAuth-токен."""
+
+    KEY = {
+        "type": "service_account",
+        "client_email": "bot@proj.iam.gserviceaccount.com",
+        "private_key": "-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n",
+    }
+
+    def test_defaults_to_oauth_token(self, env):
+        config = env()
+        assert config.google_service_account_info is None
+        assert config.google_token_file.exists()
+
+    def test_key_from_env_var_needs_no_files(self, monkeypatch, tmp_path, env):
+        monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_JSON", json.dumps(self.KEY))
+        monkeypatch.setenv("GOOGLE_CALENDAR_ID", "me@gmail.com")
+        monkeypatch.setenv("GOOGLE_TOKEN_FILE", str(tmp_path / "absent.json"))
+
+        config = env()
+        assert config.google_service_account_info["client_email"] == self.KEY["client_email"]
+
+    def test_key_from_file(self, monkeypatch, tmp_path, env):
+        key_file = tmp_path / "service-account.json"
+        key_file.write_text(json.dumps(self.KEY), encoding="utf-8")
+        monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_FILE", str(key_file))
+        monkeypatch.setenv("GOOGLE_CALENDAR_ID", "me@gmail.com")
+        monkeypatch.setenv("GOOGLE_TOKEN_FILE", str(tmp_path / "absent.json"))
+
+        assert env().google_service_account_info["client_email"] == self.KEY["client_email"]
+
+    def test_env_var_wins_over_file(self, monkeypatch, tmp_path, env):
+        key_file = tmp_path / "service-account.json"
+        key_file.write_text(json.dumps({**self.KEY, "client_email": "file@x.com"}), encoding="utf-8")
+        monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_FILE", str(key_file))
+        monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_JSON", json.dumps(self.KEY))
+        monkeypatch.setenv("GOOGLE_CALENDAR_ID", "me@gmail.com")
+
+        assert env().google_service_account_info["client_email"] == self.KEY["client_email"]
+
+    def test_broken_json_rejected(self, monkeypatch, env):
+        monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_JSON", "{не json")
+        monkeypatch.setenv("GOOGLE_CALENDAR_ID", "me@gmail.com")
+        with pytest.raises(ConfigError, match="JSON"):
+            env()
+
+    def test_key_without_private_key_rejected(self, monkeypatch, env):
+        monkeypatch.setenv(
+            "GOOGLE_SERVICE_ACCOUNT_JSON",
+            json.dumps({"client_email": "bot@proj.iam.gserviceaccount.com"}),
+        )
+        monkeypatch.setenv("GOOGLE_CALENDAR_ID", "me@gmail.com")
+        with pytest.raises(ConfigError, match="private_key"):
+            env()
+
+    def test_missing_key_file_rejected(self, monkeypatch, tmp_path, env):
+        monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_FILE", str(tmp_path / "nope.json"))
+        monkeypatch.setenv("GOOGLE_CALENDAR_ID", "me@gmail.com")
+        with pytest.raises(ConfigError, match="сервисного аккаунта"):
+            env()
+
+    def test_service_account_with_primary_is_rejected(self, monkeypatch, env):
+        """primary у сервисного аккаунта — его собственный пустой календарь."""
+        monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_JSON", json.dumps(self.KEY))
+        monkeypatch.setenv("GOOGLE_CALENDAR_ID", "primary")
+        with pytest.raises(ConfigError, match="primary"):
+            env()
+
+    def test_neither_mode_configured_is_rejected(self, monkeypatch, tmp_path, env):
+        monkeypatch.setenv("GOOGLE_TOKEN_FILE", str(tmp_path / "absent.json"))
+        with pytest.raises(ConfigError, match="GOOGLE_SERVICE_ACCOUNT_JSON"):
             env()

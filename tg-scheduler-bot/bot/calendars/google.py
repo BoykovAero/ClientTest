@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from google.auth.transport.requests import Request
+from google.oauth2 import service_account
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -29,16 +30,44 @@ TARGET = "Google"
 
 
 class GoogleCalendar:
-    def __init__(self, token_file: Path, calendar_id: str, timezone_name: str) -> None:
+    """Доступ к Google Calendar одним из двух способов.
+
+    Сервисный аккаунт (``service_account_file``) — предпочтительный для
+    сервера: браузер не нужен, срок действия не истекает. Календарь при этом
+    должен быть явно расшарен на адрес сервисного аккаунта.
+
+    OAuth-токен (``token_file``) — путь для того, у кого уже есть готовый
+    token.json от google_auth_setup.py.
+    """
+
+    def __init__(
+        self,
+        calendar_id: str,
+        timezone_name: str,
+        token_file: Path | None = None,
+        service_account_info: dict | None = None,
+    ) -> None:
+        if token_file is None and service_account_info is None:
+            raise ValueError("нужен либо token_file, либо service_account_info")
         self._token_file = token_file
+        self._service_account_info = service_account_info
         self._calendar_id = calendar_id
         self._timezone_name = timezone_name
         self._lock = threading.Lock()
-        self._credentials_cache: Credentials | None = None
+        self._credentials_cache = None
         self._service = None
 
+    @property
+    def uses_service_account(self) -> bool:
+        return self._service_account_info is not None
+
+    @property
+    def service_account_email(self) -> str:
+        """Адрес, на который нужно расшарить календарь."""
+        return (self._service_account_info or {}).get("client_email", "")
+
     # ─── авторизация ────────────────────────────────────────────────────────
-    def _credentials(self) -> Credentials:
+    def _credentials(self):
         """Действительные учётные данные.
 
         Объект Credentials создаётся один раз и дальше обновляется на месте.
@@ -46,6 +75,26 @@ class GoogleCalendar:
         перечитывание файла заново давало бы сервису устаревший объект,
         а запись обновлённого токена на диск теряла бы смысл.
         """
+        if self.uses_service_account:
+            return self._service_account_credentials()
+        return self._oauth_credentials()
+
+    def _service_account_credentials(self):
+        """Ключ сервисного аккаунта: обновляется сам, на диск писать нечего."""
+        if self._credentials_cache is None:
+            try:
+                self._credentials_cache = service_account.Credentials.from_service_account_info(
+                    self._service_account_info, scopes=SCOPES
+                )
+            except ValueError as exc:
+                raise CalendarError(f"ключ сервисного аккаунта испорчен: {exc}") from exc
+
+        creds = self._credentials_cache
+        if not creds.valid:
+            creds.refresh(Request())
+        return creds
+
+    def _oauth_credentials(self) -> Credentials:
         if self._credentials_cache is None:
             if not self._token_file.exists():
                 raise CalendarError(
@@ -184,7 +233,10 @@ def _describe(exc: HttpError) -> str:
     known = {
         401: "доступ отозван, нужен новый token.json",
         403: "Calendar API не включён или превышена квота",
-        404: "календарь не найден, проверь GOOGLE_CALENDAR_ID",
+        404: (
+            "календарь не найден: проверь GOOGLE_CALENDAR_ID, а при сервисном "
+            "аккаунте — что календарь расшарен на его адрес"
+        ),
     }
     if status in known:
         return f"{status}: {known[status]}"

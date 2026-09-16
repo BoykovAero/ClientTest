@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from datetime import time
@@ -37,6 +38,7 @@ class Config:
 
     google_credentials_file: Path
     google_token_file: Path
+    google_service_account_info: dict | None
     google_calendar_id: str
 
     timezone: ZoneInfo
@@ -78,6 +80,55 @@ def _parse_positive_int(name: str, raw: str, default: int, problems: list[str]) 
         problems.append(f"{name}: ожидается положительное число, получено {value}")
         return default
     return value
+
+
+def _load_service_account(problems: list[str]) -> dict | None:
+    """Ключ сервисного аккаунта из переменной окружения или из файла.
+
+    На облачных хостингах диска для файлов обычно нет, поэтому JSON кладут
+    целиком в GOOGLE_SERVICE_ACCOUNT_JSON. На своём сервере удобнее файл.
+    """
+    raw_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+    raw_path = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE", "").strip()
+
+    if raw_json:
+        source = "GOOGLE_SERVICE_ACCOUNT_JSON"
+        try:
+            info = json.loads(raw_json)
+        except json.JSONDecodeError as exc:
+            problems.append(f"{source}: не разбирается как JSON ({exc})")
+            return None
+    elif raw_path:
+        path = BASE_DIR / raw_path
+        source = str(path)
+        if not path.exists():
+            problems.append(
+                f"Не найден {path}. Это JSON-ключ сервисного аккаунта из "
+                "Google Cloud Console (DEPLOY.md, шаг 4)."
+            )
+            return None
+        try:
+            info = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            problems.append(f"{source}: не читается как JSON ({exc})")
+            return None
+    else:
+        return None
+
+    if not isinstance(info, dict):
+        problems.append(f"{source}: ожидается JSON-объект")
+        return None
+
+    # Без этих полей google-auth упадёт уже в рантайме, на первом событии.
+    absent = [key for key in ("client_email", "private_key") if not info.get(key)]
+    if absent:
+        problems.append(
+            f"{source}: в ключе нет полей {', '.join(absent)} — "
+            "скачай JSON-ключ заново в Google Cloud Console"
+        )
+        return None
+
+    return info
 
 
 def load_config(env_file: Path | None = None) -> Config:
@@ -125,10 +176,32 @@ def load_config(env_file: Path | None = None) -> Config:
         "GOOGLE_CREDENTIALS_FILE", "credentials.json"
     )
     google_token_file = BASE_DIR / os.environ.get("GOOGLE_TOKEN_FILE", "token.json")
-    if not google_token_file.exists():
+    google_calendar_id = os.environ.get("GOOGLE_CALENDAR_ID", "primary").strip() or "primary"
+
+    # В Google можно ходить двумя способами. Сервисный аккаунт не требует
+    # браузера и не протухает — он предпочтителен для сервера; OAuth-токен
+    # остаётся для тех, у кого уже есть готовый token.json.
+    #
+    # Ключ сервисного аккаунта берётся либо прямо из переменной окружения
+    # (так его задают на облачных хостингах, где нет диска для файлов), либо
+    # из файла. Переменная имеет приоритет.
+    google_service_account_info = _load_service_account(problems)
+
+    if google_service_account_info is not None:
+        if google_calendar_id == "primary":
+            # У сервисного аккаунта свой собственный пустой primary-календарь,
+            # и события ушли бы в него, а не к пользователю.
+            problems.append(
+                "GOOGLE_CALENDAR_ID=primary несовместим с сервисным аккаунтом: "
+                "укажи адрес своего календаря (обычно это твой gmail) и открой "
+                "ему доступ на изменение событий (DEPLOY.md, шаг 4)."
+            )
+    elif not google_token_file.exists():
         problems.append(
-            f"Не найден {google_token_file}. Получи его на своей машине: "
-            "python3 google_auth_setup.py (DEPLOY.md, шаг 4.5)."
+            "Нет доступа к Google: не задан ни GOOGLE_SERVICE_ACCOUNT_JSON, ни "
+            f"GOOGLE_SERVICE_ACCOUNT_FILE, и не найден {google_token_file.name}. "
+            "Нужен либо ключ сервисного аккаунта, либо token.json от "
+            "python3 google_auth_setup.py (DEPLOY.md, шаг 4)."
         )
 
     if missing:
@@ -150,7 +223,8 @@ def load_config(env_file: Path | None = None) -> Config:
         icloud_calendar_name=os.environ.get("ICLOUD_CALENDAR_NAME", "").strip(),
         google_credentials_file=google_credentials_file,
         google_token_file=google_token_file,
-        google_calendar_id=os.environ.get("GOOGLE_CALENDAR_ID", "primary").strip() or "primary",
+        google_service_account_info=google_service_account_info,
+        google_calendar_id=google_calendar_id,
         timezone=timezone,
         daily_prompt_time=daily_prompt_time,
         default_event_minutes=default_event_minutes,

@@ -47,10 +47,19 @@ def build_application(config: Config) -> Application:
     openai_client = AsyncOpenAI(api_key=config.openai_api_key)
 
     google = GoogleCalendar(
-        token_file=config.google_token_file,
         calendar_id=config.google_calendar_id,
         timezone_name=config.timezone_name,
+        token_file=config.google_token_file,
+        service_account_info=config.google_service_account_info,
     )
+    if google.uses_service_account:
+        logger.info(
+            "Google: сервисный аккаунт %s -> календарь %s",
+            google.service_account_email,
+            config.google_calendar_id,
+        )
+    else:
+        logger.info("Google: OAuth-токен -> календарь %s", config.google_calendar_id)
     icloud = ICloudCalendar(
         url=config.icloud_caldav_url,
         apple_id=config.icloud_apple_id,
