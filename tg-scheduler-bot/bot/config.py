@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import os
 from dataclasses import dataclass
@@ -93,6 +95,18 @@ def _load_service_account(problems: list[str]) -> dict | None:
 
     if raw_json:
         source = "GOOGLE_SERVICE_ACCOUNT_JSON"
+        # Ключ принимается и как обычный JSON, и как base64 от него. Второе —
+        # страховка от панелей хостингов, которые калечат многострочные
+        # значения: внутри private_key есть переводы строк.
+        if not raw_json.lstrip().startswith("{"):
+            try:
+                raw_json = base64.b64decode(raw_json, validate=True).decode("utf-8")
+            except (binascii.Error, UnicodeDecodeError, ValueError):
+                problems.append(
+                    f"{source}: значение не похоже ни на JSON (должно начинаться "
+                    "с фигурной скобки), ни на base64 от него"
+                )
+                return None
         try:
             info = json.loads(raw_json)
         except json.JSONDecodeError as exc:

@@ -195,3 +195,37 @@ class TestGoogleAuthMode:
         monkeypatch.setenv("GOOGLE_TOKEN_FILE", str(tmp_path / "absent.json"))
         with pytest.raises(ConfigError, match="GOOGLE_SERVICE_ACCOUNT_JSON"):
             env()
+
+
+class TestServiceAccountAsBase64:
+    """Панели хостингов иногда калечат многострочные значения — принимаем base64."""
+
+    KEY = TestGoogleAuthMode.KEY
+
+    def test_base64_is_accepted(self, monkeypatch, env):
+        import base64
+
+        encoded = base64.b64encode(json.dumps(self.KEY).encode("utf-8")).decode("ascii")
+        monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_JSON", encoded)
+        monkeypatch.setenv("GOOGLE_CALENDAR_ID", "me@gmail.com")
+
+        assert env().google_service_account_info["client_email"] == self.KEY["client_email"]
+
+    def test_plain_json_still_works(self, monkeypatch, env):
+        monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_JSON", json.dumps(self.KEY))
+        monkeypatch.setenv("GOOGLE_CALENDAR_ID", "me@gmail.com")
+
+        assert env().google_service_account_info["client_email"] == self.KEY["client_email"]
+
+    def test_json_with_real_newlines_survives(self, monkeypatch, env):
+        """Именно так выглядит скачанный из консоли файл — с отступами."""
+        monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_JSON", json.dumps(self.KEY, indent=2))
+        monkeypatch.setenv("GOOGLE_CALENDAR_ID", "me@gmail.com")
+
+        assert env().google_service_account_info["client_email"] == self.KEY["client_email"]
+
+    def test_garbage_names_both_formats(self, monkeypatch, env):
+        monkeypatch.setenv("GOOGLE_SERVICE_ACCOUNT_JSON", "совершенно не то")
+        monkeypatch.setenv("GOOGLE_CALENDAR_ID", "me@gmail.com")
+        with pytest.raises(ConfigError, match="base64"):
+            env()
