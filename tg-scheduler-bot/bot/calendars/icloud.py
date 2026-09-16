@@ -72,6 +72,15 @@ class ICloudCalendar:
                 )
         else:
             self._calendar = calendars[0]
+            if len(calendars) > 1:
+                # Молча взять первый из нескольких — верный способ потом
+                # искать события не в том календаре.
+                logger.warning(
+                    "iCloud: ICLOUD_CALENDAR_NAME не задан, пишу в %r. "
+                    "Доступны: %s",
+                    str(self._calendar.name),
+                    ", ".join(repr(str(c.name)) for c in calendars),
+                )
 
         logger.info("iCloud: работаю с календарём %r", str(self._calendar.name))
         return self._calendar
