@@ -12,6 +12,7 @@ Calendar** и в **iCloud** (он же «Календарь» на Mac).
 | **[DEPLOY.md](DEPLOY.md)** | пошаговое руководство: ключи → сервер → systemd → проверка | читать первым |
 | `bot/` | код бота, точка входа `python -m bot` | сервер |
 | `tests/` | тесты чистой логики, сеть не нужна | разработка |
+| `setup_env.py` | спрашивает ключи, проверяет каждый по-настоящему, пишет `.env` | **Mac** |
 | `.env.example` | шаблон всех переменных окружения | Mac |
 | `google_auth_setup.py` | одноразовый OAuth в Google Calendar, выдаёт `token.json` | **Mac** (нужен браузер) |
 | `requirements.txt` | python-зависимости | сервер |
@@ -33,11 +34,13 @@ Calendar** и в **iCloud** (он же «Календарь» на Mac).
 ## С чего начать
 
 ```bash
-cp .env.example .env && chmod 600 .env
+python3 setup_env.py
 ```
 
-Дальше — по [DEPLOY.md](DEPLOY.md), шаги 1–4: токен у @BotFather, ключ OpenAI,
-app-specific password Apple, OAuth Google.
+Скрипт спросит каждый ключ, сразу проверит его обращением к настоящему сервису
+и запишет `.env` с правами 600. Где брать значения — [DEPLOY.md](DEPLOY.md),
+шаги 1–4: токен у @BotFather, ключ OpenAI, app-specific password Apple,
+OAuth Google.
 
 ## Тесты
 
