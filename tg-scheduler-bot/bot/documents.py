@@ -16,9 +16,10 @@ logger = logging.getLogger(__name__)
 
 # Telegram отдаёт ботам файлы не больше 20 МБ, но расписание столько не весит.
 MAX_FILE_BYTES = 10 * 1024 * 1024
-# Ограничение на объём текста, уходящего в модель: расписание на год может
-# быть огромным, а разбирать всё разом и дорого, и бессмысленно.
-MAX_TEXT_CHARS = 12_000
+# Предел на объём текста. Он высокий, потому что разбор идёт частями:
+# в модель за раз уходит кусок, а не весь файл. Ограничение остаётся ради
+# страховки от по-настоящему гигантских выгрузок.
+MAX_TEXT_CHARS = 60_000
 
 DOCUMENT_SUFFIXES = {".docx", ".xlsx", ".txt", ".md", ".csv"}
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".heic"}
@@ -71,6 +72,13 @@ def extract_text(filename: str, data: bytes) -> str:
         logger.info("Файл %r обрезан с %d до %d символов", filename, len(text), MAX_TEXT_CHARS)
         text = text[:MAX_TEXT_CHARS]
     return text
+
+
+def is_large(text: str) -> bool:
+    """Стоит ли предупредить пользователя, что разбор займёт время."""
+    from bot.parser import CHUNK_CHARS
+
+    return len(text) > CHUNK_CHARS
 
 
 # Доля управляющих символов, выше которой считаем, что перед нами не текст.

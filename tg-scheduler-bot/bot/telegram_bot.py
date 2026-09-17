@@ -19,7 +19,7 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 from bot.calendars.base import CalendarError, Event, SaveResult
-from bot.documents import DocumentError, extract_text, kind_of
+from bot.documents import DocumentError, extract_text, is_large, kind_of
 from bot.llm import WORKS, WORKS_WITH_VISION, available_models, probe_all
 from bot.parser import ParseError
 from bot.transcribe import TranscriptionError
@@ -253,10 +253,18 @@ class SchedulerBot:
         поэтому здесь всегда спрашиваем подтверждение.
         """
         await self._typing(update)
+        notice = None
+        if is_large(text):
+            # Большой файл разбирается частями и это заметно по времени.
+            notice = await update.message.reply_text(
+                "Расписание большое, разбираю по частям — это займёт до минуты…"
+            )
+
         try:
             events = await self._parser.parse(text, instruction=instruction)
         except ParseError as exc:
             logger.warning("Разбор файла не удался: %s", exc)
+            await _drop(notice)
             await update.message.reply_text(f"Не смог разобрать расписание: {exc}")
             return
 
@@ -266,6 +274,7 @@ class SchedulerBot:
                 if not instruction
                 else ""
             )
+            await _drop(notice)
             await update.message.reply_text(
                 f"В файле не нашлось подходящих дел с датой или временем.{hint}"
             )
@@ -290,6 +299,7 @@ class SchedulerBot:
                 ]
             ]
         )
+        await _drop(notice)
         await update.message.reply_text("\n".join(lines), reply_markup=keyboard)
 
     async def on_decision(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -383,6 +393,16 @@ class SchedulerBot:
             await update.message.chat.send_action(ChatAction.TYPING)
         except TelegramError:
             pass  # индикатор набора — мелочь, ради неё ничего не ломаем
+
+
+async def _drop(message) -> None:
+    """Убирает временное уведомление. Его пропажа — мелочь, падать не из-за чего."""
+    if message is None:
+        return
+    try:
+        await message.delete()
+    except TelegramError:
+        pass
 
 
 def _plural_found(count: int) -> str:

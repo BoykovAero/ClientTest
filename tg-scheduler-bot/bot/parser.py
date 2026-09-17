@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import date, datetime, timedelta
@@ -56,6 +57,17 @@ SYSTEM_PROMPT = """\
 # Ответ с событиями не должен обрываться на середине: оборванный JSON
 # провайдер отвергает целиком.
 MAX_RESPONSE_TOKENS = 4000
+
+# Большой текст разбирается частями: маленькие модели не удерживают
+# в формате ответ сразу по целому расписанию.
+CHUNK_CHARS = 5000
+# Верхний предел на число частей — страховка от обработки гигантского файла.
+MAX_CHUNKS = 12
+# Сколько первых строк считать шапкой и повторять в каждой части: в таблице
+# без неё колонки теряют смысл.
+HEADER_LINES = 3
+# Сколько частей разбирать одновременно.
+CHUNK_CONCURRENCY = 3
 
 
 class ParseError(RuntimeError):
@@ -159,6 +171,57 @@ def events_from_payload(
     return events
 
 
+def split_into_chunks(
+    text: str, chunk_chars: int = CHUNK_CHARS, header_lines: int = HEADER_LINES
+) -> list[str]:
+    """Режет текст по строкам на части не длиннее chunk_chars.
+
+    Шапка таблицы повторяется в каждой части: без неё строки вида
+    «08:30 | 11а | 11б» теряют привязку к колонкам.
+    """
+    if len(text) <= chunk_chars:
+        return [text]
+
+    lines = text.split("\n")
+    # Шапка оправдана только если таблица заметно длиннее её самой.
+    header = lines[:header_lines] if len(lines) > header_lines * 3 else []
+    header_text = "\n".join(header)
+    body = lines[len(header):]
+
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = len(header_text)
+
+    for line in body:
+        if current and current_len + len(line) + 1 > chunk_chars:
+            chunks.append("\n".join(header + current) if header else "\n".join(current))
+            current = []
+            current_len = len(header_text)
+        current.append(line)
+        current_len += len(line) + 1
+
+    if current:
+        chunks.append("\n".join(header + current) if header else "\n".join(current))
+    return chunks[:MAX_CHUNKS]
+
+
+def merge_events(groups: list[list[Event]]) -> list[Event]:
+    """Складывает события из частей, отбрасывая повторы.
+
+    На стыке частей одно событие может попасть в обе; UID считается из
+    содержимого, поэтому повтор виден без дополнительных ухищрений.
+    """
+    seen: set[str] = set()
+    merged: list[Event] = []
+    for group in groups:
+        for event in group:
+            if event.uid in seen:
+                continue
+            seen.add(event.uid)
+            merged.append(event)
+    return sorted(merged, key=lambda event: event.start)
+
+
 class PlanParser:
     def __init__(
         self,
@@ -177,8 +240,36 @@ class PlanParser:
     async def parse(
         self, text: str, now: datetime | None = None, instruction: str = ""
     ) -> list[Event]:
-        """Текст -> список событий. Бросает ParseError, если модель не ответила."""
+        """Текст -> список событий. Большой текст разбирается частями."""
         moment = now or datetime.now(self._tz)
+        chunks = split_into_chunks(text)
+        if len(chunks) == 1:
+            return await self._parse_chunk(chunks[0], moment, instruction)
+
+        logger.info("Разбор: текст поделён на %d частей", len(chunks))
+        limit = asyncio.Semaphore(CHUNK_CONCURRENCY)
+
+        async def one(chunk: str) -> list[Event]:
+            async with limit:
+                try:
+                    return await self._parse_chunk(chunk, moment, instruction)
+                except ParseError as exc:
+                    # Одна неудачная часть не должна отменять остальные.
+                    logger.warning("Разбор: часть не разобралась: %s", exc)
+                    return []
+
+        groups = await asyncio.gather(*(one(chunk) for chunk in chunks))
+        events = merge_events(list(groups))
+        if not events and all(not group for group in groups):
+            raise ParseError(
+                "ни одна часть файла не разобралась — попробуй сузить просьбу "
+                "подписью или прислать кусок расписания поменьше"
+            )
+        return events
+
+    async def _parse_chunk(
+        self, text: str, moment: datetime, instruction: str
+    ) -> list[Event]:
         try:
             response = await self._client.chat.completions.create(
                 model=self._model,

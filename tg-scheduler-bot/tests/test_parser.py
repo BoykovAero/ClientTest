@@ -199,3 +199,91 @@ class TestInstructionInPrompt:
         prompt = build_user_prompt("текст", self.NOW, "Europe/Moscow", "только 11Е")
         assert "2026-09-17" in prompt
         assert "четверг" in prompt
+
+
+class TestChunking:
+    """Большой текст режется на части — иначе маленькая модель не справляется."""
+
+    def test_short_text_is_not_split(self):
+        from bot.parser import split_into_chunks
+
+        assert split_into_chunks("одна строка") == ["одна строка"]
+
+    def test_long_text_is_split(self):
+        from bot.parser import split_into_chunks
+
+        text = "\n".join(f"строка {i}" for i in range(2000))
+        chunks = split_into_chunks(text, chunk_chars=1000)
+        assert len(chunks) > 1
+
+    def test_chunks_respect_the_limit(self):
+        from bot.parser import split_into_chunks
+
+        text = "\n".join(f"строка номер {i}" for i in range(500))
+        for chunk in split_into_chunks(text, chunk_chars=500, header_lines=0):
+            # допускается перебор на одну длинную строку, но не кратный
+            assert len(chunk) < 1000
+
+    def test_header_repeats_in_every_chunk(self):
+        """Без шапки строки таблицы теряют привязку к колонкам."""
+        from bot.parser import split_into_chunks
+
+        header = "время | 11а | 11б | 11е инж"
+        rows = [f"{h:02d}:00 | урок{h} | урок{h} | урок{h}" for h in range(100)]
+        chunks = split_into_chunks("\n".join([header, "—" * 10, "="* 10] + rows),
+                                   chunk_chars=400, header_lines=3)
+        assert len(chunks) > 1
+        for chunk in chunks:
+            assert header in chunk
+
+    def test_no_line_is_lost(self):
+        from bot.parser import split_into_chunks
+
+        rows = [f"дело {i}" for i in range(200)]
+        chunks = split_into_chunks("\n".join(rows), chunk_chars=300, header_lines=0)
+        joined = "\n".join(chunks)
+        for row in rows:
+            assert row in joined
+
+    def test_chunk_count_is_capped(self):
+        from bot.parser import MAX_CHUNKS, split_into_chunks
+
+        text = "\n".join(f"строка {i}" for i in range(50_000))
+        assert len(split_into_chunks(text, chunk_chars=100, header_lines=0)) <= MAX_CHUNKS
+
+
+class TestMergeEvents:
+    """События из частей складываются, повторы со стыков отбрасываются."""
+
+    @staticmethod
+    def event(title, hour):
+        from bot.calendars.base import Event
+
+        return Event(
+            title=title,
+            start=datetime(2026, 9, 18, hour, 0, tzinfo=MSK),
+            end=datetime(2026, 9, 18, hour + 1, 0, tzinfo=MSK),
+        )
+
+    def test_merges_groups(self):
+        from bot.parser import merge_events
+
+        merged = merge_events([[self.event("А", 9)], [self.event("Б", 10)]])
+        assert [e.title for e in merged] == ["А", "Б"]
+
+    def test_duplicates_are_dropped(self):
+        from bot.parser import merge_events
+
+        merged = merge_events([[self.event("А", 9)], [self.event("А", 9)]])
+        assert len(merged) == 1
+
+    def test_result_is_ordered_by_time(self):
+        from bot.parser import merge_events
+
+        merged = merge_events([[self.event("поздно", 18)], [self.event("рано", 9)]])
+        assert [e.title for e in merged] == ["рано", "поздно"]
+
+    def test_empty_groups(self):
+        from bot.parser import merge_events
+
+        assert merge_events([[], []]) == []
