@@ -39,6 +39,7 @@ class Config:
     openai_base_url: str
     openai_model: str
     openai_transcribe_model: str
+    openai_vision_model: str
 
     icloud_apple_id: str
     icloud_app_password: str
@@ -257,6 +258,7 @@ def load_config(env_file: Path | None = None) -> Config:
         openai_base_url=openai_base_url,
         openai_model=os.environ.get("OPENAI_MODEL", "gpt-4o-mini").strip(),
         openai_transcribe_model=os.environ.get("OPENAI_TRANSCRIBE_MODEL", "whisper-1").strip(),
+        openai_vision_model=os.environ.get("OPENAI_VISION_MODEL", "qwen/qwen3.6-27b").strip(),
         icloud_apple_id=icloud_apple_id,
         icloud_app_password=icloud_app_password,
         icloud_caldav_url=os.environ.get("ICLOUD_CALDAV_URL", "https://caldav.icloud.com").strip(),

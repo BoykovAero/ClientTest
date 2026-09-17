@@ -31,10 +31,10 @@ def _status(exc: OpenAIError) -> int | None:
     return getattr(exc, "status_code", None)
 
 
-def _is_model_not_found(exc: OpenAIError) -> bool:
-    if _status(exc) != 404:
-        return False
-    return "model" in str(exc).lower()
+# Оба статуса провайдеры отдают и когда модели нет, и когда она есть, но
+# закрыта тарифом. Отличить одно от другого по тексту ненадёжно, поэтому
+# ниже мы просто спрашиваем список доступных моделей и смотрим фактам в лицо.
+MODEL_STATUSES = (403, 404)
 
 
 async def available_models(client: AsyncOpenAI) -> list[str]:
@@ -51,16 +51,28 @@ async def describe(exc: OpenAIError, client: AsyncOpenAI, model: str) -> str:
     """Короткое объяснение ошибки — оно уходит пользователю в Telegram."""
     status = _status(exc)
 
-    if _is_model_not_found(exc):
+    if status in MODEL_STATUSES:
         names = await available_models(client)
+        if names and model not in names:
+            shown = ", ".join(names[:MODELS_SHOWN])
+            more = f" и ещё {len(names) - MODELS_SHOWN}" if len(names) > MODELS_SHOWN else ""
+            return (
+                f"модель {model!r} недоступна. Доступны: {shown}{more}. "
+                "Поправь переменную окружения с именем модели"
+            )
+        if names and model in names:
+            # Модель в списке есть, а обращение отклонено — дело не в имени.
+            return (
+                f"модель {model!r} числится доступной, но провайдер отказал "
+                f"({status}). Похоже, она закрыта твоим тарифом"
+            )
         if not names:
-            return f"модель {model!r} недоступна у провайдера"
-        shown = ", ".join(names[:MODELS_SHOWN])
-        more = f" и ещё {len(names) - MODELS_SHOWN}" if len(names) > MODELS_SHOWN else ""
-        return (
-            f"модель {model!r} недоступна. Доступны: {shown}{more}. "
-            "Поправь переменную окружения с именем модели"
-        )
+            # Список не получить, но статус всё равно указывает на модель —
+            # лучше сказать это, чем вывалить сырой текст провайдера.
+            return (
+                f"модель {model!r} недоступна ({status}), "
+                "а список моделей у провайдера получить не удалось"
+            )
 
     if status in KNOWN_STATUSES:
         return f"{status}: {KNOWN_STATUSES[status]}"

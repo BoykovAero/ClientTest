@@ -84,9 +84,33 @@ class TestOtherStatuses:
         assert message == "первая строка"
 
     @pytest.mark.asyncio
-    async def test_404_without_model_word_is_not_treated_as_model_error(self):
-        message = await describe(FakeError("Not Found", 404), FakeClient(["a"]), "m")
+    async def test_403_also_lists_models(self):
+        """Тариф может закрывать модель — статус другой, растерянность та же."""
+        client = FakeClient(["qwen/qwen3.6-27b"])
+        message = await describe(FakeError("Forbidden", 403), client, "openai/gpt-oss-120b")
+        assert "недоступна" in message
+        assert "qwen/qwen3.6-27b" in message
+
+    @pytest.mark.asyncio
+    async def test_existing_model_refused_is_called_a_plan_limit(self):
+        """Модель в списке есть, а доступ закрыт — дело не в имени."""
+        client = FakeClient(["openai/gpt-oss-120b"])
+        message = await describe(FakeError("Forbidden", 403), client, "openai/gpt-oss-120b")
+        assert "тарифом" in message
         assert "Доступны" not in message
+
+    @pytest.mark.asyncio
+    async def test_falls_back_when_list_unavailable(self):
+        message = await describe(FakeError("Forbidden", 403), FakeClient(fail=True), "m")
+        assert "403" in message
+
+
+class TestAuthErrorsStayAuthErrors:
+    @pytest.mark.asyncio
+    async def test_401_does_not_list_models(self):
+        message = await describe(FakeError("Unauthorized", 401), FakeClient(["a", "b"]), "m")
+        assert "Доступны" not in message
+        assert "отозван" in message
 
 
 def test_models_shown_is_sane():
