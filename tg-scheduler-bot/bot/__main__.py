@@ -11,6 +11,7 @@ import sys
 from datetime import time
 
 from openai import AsyncOpenAI
+from telegram.error import InvalidToken
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -148,7 +149,16 @@ def main() -> int:
 
     application = build_application(config)
     logger.info("Поллинг Telegram запущен")
-    application.run_polling(drop_pending_updates=True)
+    try:
+        application.run_polling(drop_pending_updates=True)
+    except InvalidToken:
+        # Своё сообщение вместо исключения библиотеки: та подставляет в текст
+        # сам токен, и он оседает в логах хостинга.
+        logger.error(
+            "Telegram отверг токен. Проверь TELEGRAM_BOT_TOKEN: "
+            "он мог быть отозван через /revoke у @BotFather — тогда нужен новый."
+        )
+        return 1
     return 0
 
 

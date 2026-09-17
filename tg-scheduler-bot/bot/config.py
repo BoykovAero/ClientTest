@@ -10,6 +10,7 @@ import base64
 import binascii
 import json
 import os
+import re
 from dataclasses import dataclass
 from datetime import time
 from pathlib import Path
@@ -163,6 +164,13 @@ def load_config(env_file: Path | None = None) -> Config:
     problems: list[str] = []
 
     telegram_bot_token = _required("TELEGRAM_BOT_TOKEN", missing)
+    if telegram_bot_token and not re.fullmatch(r"\d{6,}:[\w-]{30,}", telegram_bot_token):
+        # Ловим заглушки и опечатки здесь: иначе python-telegram-bot падает
+        # с трассировкой, в которую вдобавок подставляет сам токен.
+        problems.append(
+            "TELEGRAM_BOT_TOKEN: не похоже на токен. Ожидается вид "
+            "123456789:AAH... — возьми у @BotFather (/newbot или /token)"
+        )
     raw_user_id = _required("ALLOWED_USER_ID", missing)
     allowed_user_id = 0
     if raw_user_id:

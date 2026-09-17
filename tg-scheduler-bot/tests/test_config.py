@@ -11,7 +11,7 @@ import pytest
 from bot.config import ConfigError, load_config
 
 REQUIRED = {
-    "TELEGRAM_BOT_TOKEN": "8123456789:AAHtest",
+    "TELEGRAM_BOT_TOKEN": "8123456789:AAHfakefakefakefakefakefakefakefake",
     "ALLOWED_USER_ID": "412345678",
     "OPENAI_API_KEY": "sk-test",
     "ICLOUD_APPLE_ID": "user@icloud.com",
@@ -251,3 +251,34 @@ class TestOpenAIBaseUrl:
         monkeypatch.setenv("OPENAI_BASE_URL", "api.groq.com/openai/v1")
         with pytest.raises(ConfigError, match="OPENAI_BASE_URL"):
             env()
+
+
+class TestTelegramTokenFormat:
+    """Заглушка или опечатка в токене должна ловиться на старте."""
+
+    def test_accepts_real_shape(self, monkeypatch, env):
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "8080076954:AAHKfH5D3bXeYUd76pHiyavxrDVHKNxJeeM")
+        assert env().telegram_bot_token.startswith("8080076954:")
+
+    @pytest.mark.parametrize(
+        "token",
+        [
+            "твой_токен_от_botfather",   # вставленная заглушка
+            "your_token_here",
+            "8080076954",                 # без секретной части
+            ":AAHKfH5D3bXeYUd76pHiyavx",  # без id
+            "8080076954:short",           # секретная часть слишком коротка
+        ],
+    )
+    def test_rejects_placeholders_and_typos(self, monkeypatch, env, token):
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", token)
+        with pytest.raises(ConfigError, match="TELEGRAM_BOT_TOKEN"):
+            env()
+
+    def test_message_does_not_echo_the_value(self, monkeypatch, env):
+        """Сообщение об ошибке не должно печатать сам токен."""
+        secret = "8080076954:AAHKfH5D3bXeYUd76pHiyavxrDVHKNxJee"
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", secret + "!!!")
+        with pytest.raises(ConfigError) as excinfo:
+            env()
+        assert secret not in str(excinfo.value)
