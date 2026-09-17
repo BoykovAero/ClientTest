@@ -102,6 +102,7 @@ def build_application(config: Config) -> Application:
         ),
         transcriber=Transcriber(openai_client, config.openai_transcribe_model),
         image_reader=ImageReader(openai_client, config.openai_vision_model),
+        openai_client=openai_client,
         google=google,
         icloud=icloud,
     )
@@ -114,6 +115,7 @@ def build_application(config: Config) -> Application:
     application.add_handler(CommandHandler("start", scheduler_bot.start))
     application.add_handler(CommandHandler("plan", scheduler_bot.plan))
     application.add_handler(CommandHandler("today", scheduler_bot.today))
+    application.add_handler(CommandHandler("models", scheduler_bot.models))
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, scheduler_bot.on_text)
     )

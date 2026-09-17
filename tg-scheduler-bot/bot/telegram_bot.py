@@ -20,6 +20,7 @@ from telegram.ext import ContextTypes
 
 from bot.calendars.base import CalendarError, Event, SaveResult
 from bot.documents import DocumentError, extract_text, kind_of
+from bot.llm import WORKS, available_models, probe_all
 from bot.parser import ParseError
 from bot.transcribe import TranscriptionError
 from bot.vision import VisionError
@@ -39,7 +40,8 @@ START_TEXT = (
     "скриншот. Я разберу его и покажу список, прежде чем записывать.\n\n"
     "Команды:\n"
     "/plan — спросить прямо сейчас\n"
-    "/today — что уже записано на сегодня"
+    "/today — что уже записано на сегодня\n"
+    "/models — какие модели доступны твоему ключу"
 )
 
 # Ключ в user_data, под которым ждут подтверждения разобранные из файла события.
@@ -49,8 +51,11 @@ PREVIEW_LIMIT = 30
 
 
 class SchedulerBot:
-    def __init__(self, config, parser, transcriber, image_reader, google, icloud) -> None:
+    def __init__(
+        self, config, parser, transcriber, image_reader, openai_client, google, icloud
+    ) -> None:
         self._config = config
+        self._openai_client = openai_client
         self._parser = parser
         self._transcriber = transcriber
         self._image_reader = image_reader
@@ -104,6 +109,47 @@ class SchedulerBot:
         lines = [f"Сегодня, {now:%d.%m}:", ""]
         lines += [f"{when}  {title}" if when else title for when, title in items]
         await update.message.reply_text("\n".join(lines))
+
+    async def models(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Проверяет каждую модель ключа настоящим запросом.
+
+        Список от провайдера включает и закрытое тарифом, и то, что вообще не
+        для переписки. Угадывать по именам — долго и неточно, поэтому просто
+        пробуем.
+        """
+        if not self._authorized(update):
+            return
+
+        await self._typing(update)
+        names = await available_models(self._openai_client)
+        if not names:
+            await update.message.reply_text(
+                "Не удалось получить список моделей — проверь ключ и OPENAI_BASE_URL."
+            )
+            return
+
+        notice = await update.message.reply_text(
+            f"Проверяю {len(names)} моделей, это займёт несколько секунд…"
+        )
+        results = await probe_all(self._openai_client, names)
+
+        working = [name for name, verdict in results if verdict == WORKS]
+        refused = [(name, verdict) for name, verdict in results if verdict != WORKS]
+
+        lines = []
+        if working:
+            lines.append("Работают:")
+            lines += [f"  ✓ {name}" for name in working]
+            lines.append("")
+            lines.append(f"Сейчас стоит: {self._config.openai_model}")
+        else:
+            lines.append("Ни одна модель не ответила — похоже, дело в ключе или тарифе.")
+        if refused:
+            lines.append("")
+            lines.append("Недоступны:")
+            lines += [f"  ✗ {name} — {verdict}" for name, verdict in refused]
+
+        await notice.edit_text("\n".join(lines))
 
     # ─── сообщения ──────────────────────────────────────────────────────────
     async def on_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

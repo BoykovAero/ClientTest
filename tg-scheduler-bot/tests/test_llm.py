@@ -141,3 +141,76 @@ class TestAuthErrorsStayAuthErrors:
 
 def test_models_shown_is_sane():
     assert 5 <= MODELS_SHOWN <= 30
+
+
+class FakeChat:
+    """Модель отвечает, отказывает или ломается — как настоящий провайдер."""
+
+    def __init__(self, behaviour: dict):
+        self._behaviour = behaviour
+        self.calls: list[str] = []
+        self.completions = self
+
+    async def create(self, model: str, **kwargs):
+        self.calls.append(model)
+        outcome = self._behaviour.get(model, "ok")
+        if outcome != "ok":
+            raise FakeError(f"отказ по {model}", outcome)
+        return object()
+
+
+class ProbeClient:
+    def __init__(self, behaviour: dict, ids=()):
+        self.chat = FakeChat(behaviour)
+        self.models = FakeModels(list(ids))
+
+
+class TestProbeChat:
+    @pytest.mark.asyncio
+    async def test_working_model(self):
+        from bot.llm import WORKS, probe_chat
+
+        assert await probe_chat(ProbeClient({}), "любая") == WORKS
+
+    @pytest.mark.asyncio
+    async def test_tier_refusal_is_readable(self):
+        from bot.llm import probe_chat
+
+        client = ProbeClient({"закрытая": 403})
+        assert "доступ" in await probe_chat(client, "закрытая")
+
+    @pytest.mark.asyncio
+    async def test_probe_asks_for_one_token_only(self):
+        """Проверка не должна стоить заметных лимитов."""
+        from bot.llm import probe_chat
+
+        client = ProbeClient({})
+        await probe_chat(client, "модель")
+        assert client.chat.calls == ["модель"]
+
+
+class TestProbeAll:
+    @pytest.mark.asyncio
+    async def test_separates_working_from_refused(self):
+        from bot.llm import WORKS, probe_all
+
+        client = ProbeClient({"плохая": 403})
+        results = dict(await probe_all(client, ["хорошая", "плохая"]))
+        assert results["хорошая"] == WORKS
+        assert results["плохая"] != WORKS
+
+    @pytest.mark.asyncio
+    async def test_checks_every_model(self):
+        from bot.llm import probe_all
+
+        names = [f"m{i}" for i in range(9)]
+        client = ProbeClient({})
+        results = await probe_all(client, names)
+        assert [name for name, _ in results] == names
+        assert sorted(client.chat.calls) == sorted(names)
+
+    @pytest.mark.asyncio
+    async def test_empty_list(self):
+        from bot.llm import probe_all
+
+        assert await probe_all(ProbeClient({}), []) == []

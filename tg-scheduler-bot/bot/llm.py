@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from openai import AsyncOpenAI, OpenAIError
@@ -88,3 +89,44 @@ async def describe(exc: OpenAIError, client: AsyncOpenAI, model: str) -> str:
     if status in KNOWN_STATUSES:
         return f"{status}: {KNOWN_STATUSES[status]}"
     return str(exc).split("\n", 1)[0][:200] or "ошибка провайдера"
+
+
+# ─── проверка моделей боем ──────────────────────────────────────────────────
+# Список от провайдера включает и то, что закрыто тарифом, и то, что вообще
+# не для переписки (распознавание речи, синтез, классификаторы). Понять, чем
+# из этого можно пользоваться, надёжнее всего одним способом — попробовать.
+
+# Сколько проверок идти одновременно: провайдеры ограничивают частоту.
+PROBE_CONCURRENCY = 4
+
+WORKS = "работает"
+
+
+async def probe_chat(client: AsyncOpenAI, model: str) -> str:
+    """Пробует модель крошечным запросом. Возвращает 'работает' или причину."""
+    try:
+        await client.chat.completions.create(
+            model=model,
+            max_tokens=1,
+            messages=[{"role": "user", "content": "ok"}],
+        )
+        return WORKS
+    except OpenAIError as exc:
+        status = _status(exc)
+        if status in KNOWN_STATUSES:
+            return KNOWN_STATUSES[status]
+        if status in MODEL_STATUSES:
+            return f"отказ ({status})"
+        text = str(exc).split("\n", 1)[0]
+        return text[:80] or "ошибка"
+
+
+async def probe_all(client: AsyncOpenAI, names: list[str]) -> list[tuple[str, str]]:
+    """Проверяет все модели и возвращает пары (имя, результат)."""
+    limit = asyncio.Semaphore(PROBE_CONCURRENCY)
+
+    async def one(name: str) -> tuple[str, str]:
+        async with limit:
+            return name, await probe_chat(client, name)
+
+    return list(await asyncio.gather(*(one(name) for name in names)))
