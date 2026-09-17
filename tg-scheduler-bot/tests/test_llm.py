@@ -144,16 +144,27 @@ def test_models_shown_is_sane():
 
 
 class FakeChat:
-    """Модель отвечает, отказывает или ломается — как настоящий провайдер."""
+    """Модель отвечает, отказывает или ломается — как настоящий провайдер.
+
+    behaviour: имя -> "ok" | "text-only" | код статуса.
+    """
 
     def __init__(self, behaviour: dict):
         self._behaviour = behaviour
         self.calls: list[str] = []
+        self.image_calls: list[str] = []
         self.completions = self
 
-    async def create(self, model: str, **kwargs):
-        self.calls.append(model)
+    async def create(self, model: str, messages, **kwargs):
+        content = messages[0]["content"]
+        is_image = not isinstance(content, str)
+        (self.image_calls if is_image else self.calls).append(model)
+
         outcome = self._behaviour.get(model, "ok")
+        if outcome == "text-only":
+            if is_image:
+                raise FakeError("messages[0].content must be a string", 400)
+            return object()
         if outcome != "ok":
             raise FakeError(f"отказ по {model}", outcome)
         return object()
@@ -187,17 +198,18 @@ class TestProbeChat:
         client = ProbeClient({})
         await probe_chat(client, "модель")
         assert client.chat.calls == ["модель"]
+        assert client.chat.image_calls == []
 
 
 class TestProbeAll:
     @pytest.mark.asyncio
     async def test_separates_working_from_refused(self):
-        from bot.llm import WORKS, probe_all
+        from bot.llm import WORKS_WITH_VISION, probe_all
 
         client = ProbeClient({"плохая": 403})
         results = dict(await probe_all(client, ["хорошая", "плохая"]))
-        assert results["хорошая"] == WORKS
-        assert results["плохая"] != WORKS
+        assert results["хорошая"] == WORKS_WITH_VISION
+        assert results["плохая"] not in (WORKS_WITH_VISION,)
 
     @pytest.mark.asyncio
     async def test_checks_every_model(self):
@@ -210,7 +222,38 @@ class TestProbeAll:
         assert sorted(client.chat.calls) == sorted(names)
 
     @pytest.mark.asyncio
+    async def test_text_only_model_is_marked_without_vision(self):
+        from bot.llm import WORKS, probe_all
+
+        client = ProbeClient({"текстовая": "text-only"})
+        results = dict(await probe_all(client, ["текстовая"]))
+        assert results["текстовая"] == WORKS
+
+    @pytest.mark.asyncio
+    async def test_vision_is_not_probed_on_refused_models(self):
+        """Лишний запрос к недоступной модели бессмыслен."""
+        from bot.llm import probe_all
+
+        client = ProbeClient({"закрытая": 403})
+        await probe_all(client, ["закрытая"])
+        assert client.chat.image_calls == []
+
+    @pytest.mark.asyncio
     async def test_empty_list(self):
         from bot.llm import probe_all
 
         assert await probe_all(ProbeClient({}), []) == []
+
+
+class TestTextOnlyModelMessage:
+    @pytest.mark.asyncio
+    async def test_content_must_be_string_is_translated(self):
+        """Сырое «content must be a string» ничего не объясняет человеку."""
+        exc = FakeError(
+            "Error code: 400 - {'error': {'message': 'messages[0].content must be "
+            "a string', 'type': 'invalid_request_error'}}",
+            400,
+        )
+        message = await describe(exc, FakeClient(), "openai/gpt-oss-20b")
+        assert "не умеет читать картинки" in message
+        assert "/models" in message

@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 # бывает в сотню строк, а в сообщение Telegram это не влезет.
 MODELS_SHOWN = 12
 
+# Текстовые модели отвергают многочастное содержимое сообщения именно так.
+# Сырой текст провайдера тут бесполезен, поэтому подменяем его своим.
+TEXT_ONLY_MARKERS = ("content must be a string", "invalid type for 'messages")
+
 KNOWN_STATUSES = {
     401: "ключ неверный или отозван",
     403: "ключу закрыт доступ",
@@ -86,6 +90,14 @@ async def describe(exc: OpenAIError, client: AsyncOpenAI, model: str) -> str:
                 "а список моделей у провайдера получить не удалось"
             )
 
+    lowered = str(exc).lower()
+    if any(marker in lowered for marker in TEXT_ONLY_MARKERS):
+        return (
+            f"модель {model!r} не умеет читать картинки. "
+            "Укажи в OPENAI_VISION_MODEL модель со зрением — какие из доступных "
+            "её поддерживают, покажет команда /models"
+        )
+
     if status in KNOWN_STATUSES:
         return f"{status}: {KNOWN_STATUSES[status]}"
     return str(exc).split("\n", 1)[0][:200] or "ошибка провайдера"
@@ -100,6 +112,7 @@ async def describe(exc: OpenAIError, client: AsyncOpenAI, model: str) -> str:
 PROBE_CONCURRENCY = 4
 
 WORKS = "работает"
+WORKS_WITH_VISION = "работает, читает картинки"
 
 
 async def probe_chat(client: AsyncOpenAI, model: str) -> str:
@@ -121,12 +134,49 @@ async def probe_chat(client: AsyncOpenAI, model: str) -> str:
         return text[:80] or "ошибка"
 
 
+# Однопиксельный прозрачный PNG: проверяет, принимает ли модель картинки,
+# не тратя ни лимитов, ни времени на настоящее изображение.
+PROBE_PIXEL = (
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
+    "AAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
+
+
+async def probe_vision(client: AsyncOpenAI, model: str) -> bool:
+    """Принимает ли модель изображения."""
+    try:
+        await client.chat.completions.create(
+            model=model,
+            max_tokens=1,
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "ok"},
+                        {"type": "image_url", "image_url": {"url": PROBE_PIXEL}},
+                    ],
+                }
+            ],
+        )
+        return True
+    except OpenAIError:
+        return False
+
+
 async def probe_all(client: AsyncOpenAI, names: list[str]) -> list[tuple[str, str]]:
-    """Проверяет все модели и возвращает пары (имя, результат)."""
+    """Проверяет все модели и возвращает пары (имя, результат).
+
+    У откликнувшихся дополнительно проверяется зрение: без этого выбрать
+    модель для картинок можно только перебором.
+    """
     limit = asyncio.Semaphore(PROBE_CONCURRENCY)
 
     async def one(name: str) -> tuple[str, str]:
         async with limit:
-            return name, await probe_chat(client, name)
+            verdict = await probe_chat(client, name)
+            if verdict != WORKS:
+                return name, verdict
+            sees = await probe_vision(client, name)
+            return name, (WORKS_WITH_VISION if sees else WORKS)
 
     return list(await asyncio.gather(*(one(name) for name in names)))

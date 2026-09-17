@@ -20,7 +20,7 @@ from telegram.ext import ContextTypes
 
 from bot.calendars.base import CalendarError, Event, SaveResult
 from bot.documents import DocumentError, extract_text, kind_of
-from bot.llm import WORKS, available_models, probe_all
+from bot.llm import WORKS, WORKS_WITH_VISION, available_models, probe_all
 from bot.parser import ParseError
 from bot.transcribe import TranscriptionError
 from bot.vision import VisionError
@@ -133,15 +133,26 @@ class SchedulerBot:
         )
         results = await probe_all(self._openai_client, names)
 
-        working = [name for name, verdict in results if verdict == WORKS]
-        refused = [(name, verdict) for name, verdict in results if verdict != WORKS]
+        ok_verdicts = (WORKS, WORKS_WITH_VISION)
+        working = [(name, verdict) for name, verdict in results if verdict in ok_verdicts]
+        refused = [(name, verdict) for name, verdict in results if verdict not in ok_verdicts]
+        seeing = [name for name, verdict in working if verdict == WORKS_WITH_VISION]
 
         lines = []
         if working:
             lines.append("Работают:")
-            lines += [f"  ✓ {name}" for name in working]
+            for name, verdict in working:
+                mark = " (читает картинки)" if verdict == WORKS_WITH_VISION else ""
+                lines.append(f"  ✓ {name}{mark}")
             lines.append("")
-            lines.append(f"Сейчас стоит: {self._config.openai_model}")
+            lines.append(f"Для текста стоит: {self._config.openai_model}")
+            lines.append(f"Для картинок стоит: {self._config.openai_vision_model}")
+            if not seeing:
+                lines.append("")
+                lines.append(
+                    "Ни одна доступная модель не читает картинки. "
+                    "Присылай расписания файлами .xlsx или .docx — их я разбираю сам."
+                )
         else:
             lines.append("Ни одна модель не ответила — похоже, дело в ключе или тарифе.")
         if refused:
