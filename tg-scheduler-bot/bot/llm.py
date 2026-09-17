@@ -22,6 +22,10 @@ MODELS_SHOWN = 12
 # Сырой текст провайдера тут бесполезен, поэтому подменяем его своим.
 TEXT_ONLY_MARKERS = ("content must be a string", "invalid type for 'messages")
 
+# Провайдер отвергает ответ, который не сложился в JSON. На больших входах
+# это обычно значит, что модель пытается перенести слишком много разом.
+JSON_FAILED_MARKERS = ("json_validate_failed", "failed to validate json")
+
 KNOWN_STATUSES = {
     401: "ключ неверный или отозван",
     403: "ключу закрыт доступ",
@@ -91,6 +95,13 @@ async def describe(exc: OpenAIError, client: AsyncOpenAI, model: str) -> str:
             )
 
     lowered = str(exc).lower()
+    if any(marker in lowered for marker in JSON_FAILED_MARKERS):
+        return (
+            "модель не смогла уложить ответ в нужный формат — обычно так бывает, "
+            "когда её просят разобрать слишком много разом. Напиши подписью к файлу, "
+            "что именно взять: например «расписание 11Е на понедельник»"
+        )
+
     if any(marker in lowered for marker in TEXT_ONLY_MARKERS):
         return (
             f"модель {model!r} не умеет читать картинки. "

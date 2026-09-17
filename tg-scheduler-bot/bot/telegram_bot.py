@@ -243,9 +243,10 @@ class SchedulerBot:
             return
 
         logger.info("Файл %r прочитан, %d символов", filename, len(text))
-        await self._propose(update, text)
+        # Подпись к файлу — это просьба: «добавь расписание 11е инж».
+        await self._propose(update, text, (message.caption or "").strip())
 
-    async def _propose(self, update: Update, text: str) -> None:
+    async def _propose(self, update: Update, text: str, instruction: str = "") -> None:
         """Разбирает текст и показывает список, не записывая ничего сразу.
 
         Извлечение из файла ошибается чаще, чем разбор короткого сообщения,
@@ -253,15 +254,20 @@ class SchedulerBot:
         """
         await self._typing(update)
         try:
-            events = await self._parser.parse(text)
+            events = await self._parser.parse(text, instruction=instruction)
         except ParseError as exc:
             logger.warning("Разбор файла не удался: %s", exc)
             await update.message.reply_text(f"Не смог разобрать расписание: {exc}")
             return
 
         if not events:
+            hint = (
+                " Уточни подписью, что именно взять — например «расписание 11Е на понедельник»."
+                if not instruction
+                else ""
+            )
             await update.message.reply_text(
-                "В файле не нашлось ни одного дела с датой или временем."
+                f"В файле не нашлось подходящих дел с датой или временем.{hint}"
             )
             return
 

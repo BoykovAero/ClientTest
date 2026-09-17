@@ -50,21 +50,38 @@ SYSTEM_PROMPT = """\
 - Время без уточнения части суток трактуй по здравому смыслу: «в 7» про ужин — это 19:00.
 - Если в тексте нет ни одного дела, верни {"events": []}.
 - Не придумывай события, которых нет в тексте.
+- Если пользователь просит выбрать что-то конкретное, возьми только это, а остальное пропусти. Расписание может быть большим — не переноси его целиком.
 """
+
+# Ответ с событиями не должен обрываться на середине: оборванный JSON
+# провайдер отвергает целиком.
+MAX_RESPONSE_TOKENS = 4000
 
 
 class ParseError(RuntimeError):
     """Не удалось получить от модели пригодный разбор."""
 
 
-def build_user_prompt(text: str, now: datetime, timezone_name: str) -> str:
-    """Собирает сообщение пользователя: контекст времени плюс исходный текст."""
+def build_user_prompt(
+    text: str, now: datetime, timezone_name: str, instruction: str = ""
+) -> str:
+    """Контекст времени, просьба пользователя и сам текст.
+
+    Просьба идёт до текста и отдельным блоком: к файлу её пишут подписью
+    («добавь расписание 11е инж»), и без неё модель пытается перенести всё
+    расписание целиком.
+    """
     weekday = WEEKDAYS_RU[now.weekday()]
-    return (
-        f"Сейчас: {now:%Y-%m-%d %H:%M} ({weekday}), тайм-зона {timezone_name}.\n"
-        f"Сегодня {now:%Y-%m-%d}, завтра {now.date() + timedelta(days=1)}.\n\n"
-        f"Текст:\n{text}"
-    )
+    parts = [
+        f"Сейчас: {now:%Y-%m-%d %H:%M} ({weekday}), тайм-зона {timezone_name}.",
+        f"Сегодня {now:%Y-%m-%d}, завтра {now.date() + timedelta(days=1)}.",
+    ]
+    if instruction.strip():
+        parts.append("")
+        parts.append(f"Просьба пользователя: {instruction.strip()}")
+    parts.append("")
+    parts.append(f"Текст:\n{text}")
+    return "\n".join(parts)
 
 
 def _parse_moment(raw: str, tz: ZoneInfo, all_day: bool) -> datetime:
@@ -157,7 +174,9 @@ class PlanParser:
         self._timezone_name = timezone_name
         self._default_minutes = default_minutes
 
-    async def parse(self, text: str, now: datetime | None = None) -> list[Event]:
+    async def parse(
+        self, text: str, now: datetime | None = None, instruction: str = ""
+    ) -> list[Event]:
         """Текст -> список событий. Бросает ParseError, если модель не ответила."""
         moment = now or datetime.now(self._tz)
         try:
@@ -165,11 +184,14 @@ class PlanParser:
                 model=self._model,
                 temperature=0,
                 response_format={"type": "json_object"},
+                max_tokens=MAX_RESPONSE_TOKENS,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {
                         "role": "user",
-                        "content": build_user_prompt(text, moment, self._timezone_name),
+                        "content": build_user_prompt(
+                            text, moment, self._timezone_name, instruction
+                        ),
                     },
                 ],
             )

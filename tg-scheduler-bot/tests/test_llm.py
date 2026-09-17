@@ -257,3 +257,17 @@ class TestTextOnlyModelMessage:
         message = await describe(exc, FakeClient(), "openai/gpt-oss-20b")
         assert "не умеет читать картинки" in message
         assert "/models" in message
+
+
+class TestJsonValidateFailed:
+    @pytest.mark.asyncio
+    async def test_is_translated_into_advice(self):
+        """Сырое json_validate_failed не объясняет, что делать."""
+        exc = FakeError(
+            "Error code: 400 - {'error': {'message': \"Failed to validate JSON. "
+            "Please adjust your prompt.\", 'code': 'json_validate_failed'}}",
+            400,
+        )
+        message = await describe(exc, FakeClient(), "openai/gpt-oss-20b")
+        assert "слишком много разом" in message
+        assert "подписью" in message

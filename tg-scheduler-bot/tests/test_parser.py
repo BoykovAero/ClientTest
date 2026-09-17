@@ -168,3 +168,34 @@ class TestUserPrompt:
     def test_states_tomorrows_date_explicitly(self):
         prompt = build_user_prompt("", datetime(2026, 9, 16, 8, 45, tzinfo=MSK), "Europe/Moscow")
         assert "2026-09-17" in prompt
+
+
+class TestInstructionInPrompt:
+    """Подпись к файлу — это просьба выбрать часть расписания, а не всё."""
+
+    NOW = datetime(2026, 9, 17, 8, 45, tzinfo=MSK)
+
+    def test_instruction_is_included(self):
+        prompt = build_user_prompt(
+            "вся таблица", self.NOW, "Europe/Moscow", "добавь расписание 11Е инж"
+        )
+        assert "добавь расписание 11Е инж" in prompt
+        assert "Просьба пользователя" in prompt
+
+    def test_instruction_comes_before_the_text(self):
+        """Иначе модель дочитает до просьбы уже после огромной таблицы."""
+        prompt = build_user_prompt("ТАБЛИЦА", self.NOW, "Europe/Moscow", "только 11Е")
+        assert prompt.index("только 11Е") < prompt.index("ТАБЛИЦА")
+
+    def test_absent_instruction_adds_no_empty_block(self):
+        prompt = build_user_prompt("текст", self.NOW, "Europe/Moscow")
+        assert "Просьба пользователя" not in prompt
+
+    def test_blank_instruction_is_ignored(self):
+        prompt = build_user_prompt("текст", self.NOW, "Europe/Moscow", "   ")
+        assert "Просьба пользователя" not in prompt
+
+    def test_time_context_survives_the_instruction(self):
+        prompt = build_user_prompt("текст", self.NOW, "Europe/Moscow", "только 11Е")
+        assert "2026-09-17" in prompt
+        assert "четверг" in prompt
