@@ -46,12 +46,12 @@ class TestGuards:
 
 class TestPlainText:
     def test_utf8(self):
-        text = extract_text("plan.txt", "завтра в 15:00 созвон".encode("utf-8"))
+        text, _ = extract_text("plan.txt", "завтра в 15:00 созвон".encode("utf-8"))
         assert "созвон" in text
 
     def test_cp1251(self):
         """Windows-1251 всё ещё встречается в выгрузках."""
-        text = extract_text("plan.txt", "совещание в 10:00".encode("cp1251"))
+        text, _ = extract_text("plan.txt", "совещание в 10:00".encode("cp1251"))
         assert "совещание" in text
 
     def test_binary_disguised_as_text_is_rejected(self):
@@ -62,11 +62,11 @@ class TestPlainText:
 
     def test_text_with_a_few_control_chars_still_passes(self):
         data = "созвон\x00 в 15:00\n" .encode("utf-8") + b"x" * 200
-        assert "созвон" in extract_text("plan.txt", data)
+        assert "созвон" in extract_text("plan.txt", data)[0]
 
     def test_csv_becomes_readable_rows(self):
         data = "дата,дело\n17.09,созвон\n18.09,спортзал\n".encode("utf-8")
-        text = extract_text("plan.csv", data)
+        text, _ = extract_text("plan.csv", data)
         assert "17.09 | созвон" in text
         assert "18.09 | спортзал" in text
 
@@ -89,17 +89,17 @@ class TestDocx:
         return buffer.getvalue()
 
     def test_paragraphs(self):
-        text = extract_text("plan.docx", self.build(paragraphs=["Понедельник: созвон в 15:00"]))
+        text, _ = extract_text("plan.docx", self.build(paragraphs=["Понедельник: созвон в 15:00"]))
         assert "созвон в 15:00" in text
 
     def test_tables_are_included(self):
         """Расписания чаще всего лежат именно в таблицах."""
         data = self.build(table_rows=[["Дата", "Событие"], ["17.09", "Олимпиада"]])
-        text = extract_text("plan.docx", data)
+        text, _ = extract_text("plan.docx", data)
         assert "17.09 | Олимпиада" in text
 
     def test_empty_paragraphs_are_dropped(self):
-        text = extract_text("plan.docx", self.build(paragraphs=["", "дело", "  "]))
+        text, _ = extract_text("plan.docx", self.build(paragraphs=["", "дело", "  "]))
         assert text.strip() == "дело"
 
     def test_broken_file(self):
@@ -123,18 +123,18 @@ class TestXlsx:
 
     def test_single_sheet(self):
         data = self.build({"Лист1": [["Дата", "Событие"], ["17.09", "Созвон"]]})
-        text = extract_text("plan.xlsx", data)
+        text, _ = extract_text("plan.xlsx", data)
         assert "17.09 | Созвон" in text
 
     def test_sheet_names_shown_when_several(self):
         data = self.build({"Сентябрь": [["17.09", "А"]], "Октябрь": [["01.10", "Б"]]})
-        text = extract_text("plan.xlsx", data)
+        text, _ = extract_text("plan.xlsx", data)
         assert "# лист: Сентябрь" in text
         assert "# лист: Октябрь" in text
 
     def test_empty_rows_and_cells_are_dropped(self):
         data = self.build({"Лист1": [["дело", None], [None, None], ["", "  "]]})
-        text = extract_text("plan.xlsx", data)
+        text, _ = extract_text("plan.xlsx", data)
         assert text.strip() == "дело"
 
     def test_broken_file(self):
@@ -147,69 +147,5 @@ class TestTruncation:
         from bot.documents import MAX_TEXT_CHARS
 
         data = ("строка расписания\n" * 5000).encode("utf-8")
-        text = extract_text("plan.txt", data)
+        text, _ = extract_text("plan.txt", data)
         assert len(text) == MAX_TEXT_CHARS
-
-
-class TestNarrowToColumn:
-    """Расписание класса — один столбец; гонять через модель всю таблицу незачем."""
-
-    HEADER = "Время | 11а | 11б | 11Е инж | 10а"
-    TEXT = "\n".join(
-        [HEADER]
-        + [f"{hour}:00 | Алгебра | История | Инж графика | Химия" for hour in range(9, 16)]
-    )
-
-    def test_finds_the_column(self):
-        from bot.documents import narrow_to_column
-
-        narrowed, name = narrow_to_column(self.TEXT, "добавь расписание 11 е инж")
-        assert name == "11Е инж"
-        assert "Инж графика" in narrowed
-        assert "Алгебра" not in narrowed
-
-    def test_time_column_is_kept(self):
-        from bot.documents import narrow_to_column
-
-        narrowed, _ = narrow_to_column(self.TEXT, "расписание 11е инж")
-        assert "9:00" in narrowed
-
-    def test_shrinks_the_text(self):
-        from bot.documents import narrow_to_column
-
-        narrowed, _ = narrow_to_column(self.TEXT, "расписание 11е инж")
-        assert len(narrowed) < len(self.TEXT) / 2
-
-    def test_spacing_and_case_do_not_matter(self):
-        from bot.documents import narrow_to_column
-
-        for instruction in ("11Е ИНЖ", "11 е инж", "расписание 11еинж на неделю"):
-            _, name = narrow_to_column(self.TEXT, instruction)
-            assert name == "11Е инж", instruction
-
-    def test_ambiguous_request_keeps_everything(self):
-        """Лучше разобрать лишнее, чем молча выбросить нужное."""
-        from bot.documents import narrow_to_column
-
-        narrowed, name = narrow_to_column(self.TEXT, "добавь всё расписание")
-        assert narrowed == self.TEXT
-        assert name == ""
-
-    def test_two_matching_columns_keep_everything(self):
-        from bot.documents import narrow_to_column
-
-        text = "Время | 11а | 11б\n9:00 | А | Б"
-        narrowed, name = narrow_to_column(text, "возьми 11а и 11б")
-        assert narrowed == text
-        assert name == ""
-
-    def test_empty_instruction(self):
-        from bot.documents import narrow_to_column
-
-        assert narrow_to_column(self.TEXT, "") == (self.TEXT, "")
-
-    def test_text_without_table_is_untouched(self):
-        from bot.documents import narrow_to_column
-
-        plain = "завтра в 15:00 созвон"
-        assert narrow_to_column(plain, "11е инж") == (plain, "")

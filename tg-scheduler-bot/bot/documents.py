@@ -12,6 +12,8 @@ import io
 import logging
 from pathlib import PurePosixPath
 
+from bot.grid import fill_merges, find_column, narrow, to_text
+
 logger = logging.getLogger(__name__)
 
 # Telegram отдаёт ботам файлы не больше 20 МБ, но расписание столько не весит.
@@ -39,18 +41,23 @@ def kind_of(filename: str, mime_type: str = "") -> str:
     return "unsupported"
 
 
-def extract_text(filename: str, data: bytes) -> str:
-    """Файл -> текст. Бросает DocumentError с внятной причиной."""
+def extract_text(filename: str, data: bytes, instruction: str = "") -> tuple[str, str]:
+    """Файл -> (текст, имя выбранного столбца).
+
+    Если в просьбе назван столбец таблицы, в текст попадает только он и
+    столбец времени: расписание класса — это одна колонка из двадцати.
+    """
     if not data:
         raise DocumentError("файл пустой")
     if len(data) > MAX_FILE_BYTES:
         raise DocumentError(f"файл больше {MAX_FILE_BYTES // (1024 * 1024)} МБ")
 
+    column_name = ""
     suffix = PurePosixPath(filename or "").suffix.lower()
     if suffix == ".docx":
         text = _from_docx(data)
     elif suffix == ".xlsx":
-        text = _from_xlsx(data)
+        text, column_name = _from_xlsx(data, instruction)
     elif suffix in {".txt", ".md"}:
         text = _decode(data)
     elif suffix == ".csv":
@@ -71,7 +78,7 @@ def extract_text(filename: str, data: bytes) -> str:
     if len(text) > MAX_TEXT_CHARS:
         logger.info("Файл %r обрезан с %d до %d символов", filename, len(text), MAX_TEXT_CHARS)
         text = text[:MAX_TEXT_CHARS]
-    return text
+    return text, column_name
 
 
 def is_large(text: str) -> bool:
@@ -136,86 +143,51 @@ def _from_docx(data: bytes) -> str:
     return "\n".join(lines)
 
 
-def _from_xlsx(data: bytes) -> str:
-    """Все листы построчно. Пустые строки и столбцы отбрасываются."""
+def _from_xlsx(data: bytes, instruction: str = "") -> tuple[str, str]:
+    """Листы книги. Если в просьбе назван столбец — только он.
+
+    Читается без read_only: объединённые области нужны целиком, а в
+    режиме чтения openpyxl их не отдаёт.
+    """
     try:
         from openpyxl import load_workbook
     except ImportError:
         raise DocumentError("на сервере не установлен openpyxl") from None
 
     try:
-        workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+        workbook = load_workbook(io.BytesIO(data), data_only=True)
     except Exception as exc:
         raise DocumentError(f"файл не читается как .xlsx ({exc})") from exc
 
-    lines: list[str] = []
+    parts: list[str] = []
+    column_name = ""
     try:
         for sheet in workbook.worksheets:
+            rows = [
+                [" ".join(str(cell.value).split()) if cell.value is not None else ""
+                 for cell in row]
+                for row in sheet.iter_rows()
+            ]
+            if not rows:
+                continue
+            merges = [
+                (m.min_row - 1, m.max_row - 1, m.min_col - 1, m.max_col - 1)
+                for m in sheet.merged_cells.ranges
+            ]
+            grid = fill_merges(rows, merges)
+
+            found = find_column(grid, instruction) if instruction else None
+            if found is not None:
+                column, column_name = found
+                body = narrow(grid, column)
+            else:
+                body = to_text(grid)
+
+            if not body:
+                continue
             if len(workbook.worksheets) > 1:
-                lines.append(f"# лист: {sheet.title}")
-            for row in sheet.iter_rows(values_only=True):
-                cells = [str(value).strip() for value in row if value is not None and str(value).strip()]
-                if cells:
-                    lines.append(" | ".join(cells))
+                parts.append(f"# лист: {sheet.title}")
+            parts.append(body)
     finally:
         workbook.close()
-    return "\n".join(lines)
-
-
-# ─── сужение таблицы до нужного столбца ─────────────────────────────────────
-# Расписание класса — это один столбец из двадцати. Разбирать всю таблицу,
-# когда просят «11Е инж», — двенадцать обращений к модели вместо одного.
-
-# Сколько первых строк осмотреть в поисках шапки.
-HEADER_SEARCH_LINES = 5
-CELL_SEPARATOR = " | "
-
-
-def _normalise(value: str) -> str:
-    """«11 е инж» и «11Е ИНЖ» — одно и то же."""
-    return "".join(ch for ch in value.lower() if ch.isalnum())
-
-
-def narrow_to_column(text: str, instruction: str) -> tuple[str, str]:
-    """Оставляет столбец времени и тот, что назван в просьбе.
-
-    Возвращает (текст, имя столбца). Если столбец не опознан однозначно,
-    текст возвращается целиком, а имя — пустым: лучше разобрать лишнее,
-    чем молча выбросить нужное.
-    """
-    wanted = _normalise(instruction)
-    if not wanted:
-        return text, ""
-
-    rows = [line.split(CELL_SEPARATOR) for line in text.splitlines()]
-    header_index, header = -1, []
-    for index, row in enumerate(rows[:HEADER_SEARCH_LINES]):
-        if len(row) > len(header):
-            header_index, header = index, row
-    if len(header) < 3:
-        return text, ""
-
-    # Столбец подходит, если его название целиком встречается в просьбе.
-    matches = [
-        (index, cell.strip())
-        for index, cell in enumerate(header)
-        if index > 0 and len(_normalise(cell)) >= 2 and _normalise(cell) in wanted
-    ]
-    if len(matches) != 1:
-        return text, ""
-
-    column, name = matches[0]
-    kept = []
-    for index, row in enumerate(rows):
-        if index < header_index:
-            continue
-        cells = [row[0].strip() if row else ""]
-        cells.append(row[column].strip() if column < len(row) else "")
-        if any(cells):
-            kept.append(CELL_SEPARATOR.join(cell for cell in cells if cell))
-
-    narrowed = "\n".join(kept)
-    logger.info(
-        "Таблица сужена до столбца %r: %d -> %d символов", name, len(text), len(narrowed)
-    )
-    return narrowed, name
+    return "\n".join(parts), column_name

@@ -19,13 +19,7 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 from bot.calendars.base import CalendarEntry, CalendarError, Event, SaveResult
-from bot.documents import (
-    DocumentError,
-    extract_text,
-    is_large,
-    kind_of,
-    narrow_to_column,
-)
+from bot.documents import DocumentError, extract_text, is_large, kind_of
 from bot.llm import WORKS, WORKS_WITH_VISION, available_models, probe_all
 from bot.parser import ParseError, split_into_chunks
 from bot.sheets import SheetsError, find_link, looks_like_sheet, strip_link
@@ -330,7 +324,9 @@ class SchedulerBot:
         notice = await update.message.reply_text("Открываю таблицу…")
 
         try:
-            text = await asyncio.to_thread(self._sheets.read, sheet_id, gid)
+            text, column = await asyncio.to_thread(
+                self._sheets.read, sheet_id, gid, instruction
+            )
         except SheetsError as exc:
             logger.warning("Таблица не прочитана: %s", exc)
             await _drop(notice)
@@ -339,7 +335,7 @@ class SchedulerBot:
 
         logger.info("Таблица прочитана, %d символов", len(text))
         await _drop(notice)
-        await self._propose(update, text, instruction)
+        await self._propose(update, text, instruction, column)
 
     async def on_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
@@ -402,30 +398,33 @@ class SchedulerBot:
             await message.reply_text("Не смог скачать файл, попробуй ещё раз.")
             return
 
+        # Подпись к файлу — это просьба: «добавь расписание 11е инж».
+        instruction = (message.caption or "").strip()
+        column = ""
         try:
             if kind == "image":
                 text = await self._image_reader.read(data, mime_type)
             else:
-                text = await asyncio.to_thread(extract_text, filename, data)
+                text, column = await asyncio.to_thread(
+                    extract_text, filename, data, instruction
+                )
         except (DocumentError, VisionError) as exc:
             logger.warning("Файл %r не прочитан: %s", filename, exc)
             await message.reply_text(f"Не смог прочитать файл: {exc}")
             return
 
         logger.info("Файл %r прочитан, %d символов", filename, len(text))
-        # Подпись к файлу — это просьба: «добавь расписание 11е инж».
-        await self._propose(update, text, (message.caption or "").strip())
+        await self._propose(update, text, instruction, column)
 
-    async def _propose(self, update: Update, text: str, instruction: str = "") -> None:
+    async def _propose(
+        self, update: Update, text: str, instruction: str = "", column: str = ""
+    ) -> None:
         """Разбирает текст и показывает список, не записывая ничего сразу.
 
         Извлечение из файла ошибается чаще, чем разбор короткого сообщения,
         поэтому здесь всегда спрашиваем подтверждение.
         """
         await self._typing(update)
-
-        # Просят один столбец — незачем гонять через модель всю таблицу.
-        text, column = narrow_to_column(text, instruction)
 
         notice = None
         progress = None

@@ -18,6 +18,8 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+from bot.grid import fill_merges, find_column, narrow, to_text
+
 logger = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
@@ -56,18 +58,13 @@ def strip_link(text: str) -> str:
 
 
 def _rows_to_text(rows: list[list]) -> str:
-    """Строки таблицы в тот же вид, что и у .xlsx: ячейки через вертикальную черту."""
-    lines = []
-    for row in rows:
-        # Пустую ячейку API отдаёт как None, и str() превратил бы её в «None».
-        cells = [
-            str(cell).strip()
-            for cell in row
-            if cell is not None and str(cell).strip()
-        ]
-        if cells:
-            lines.append(" | ".join(cells))
-    return "\n".join(lines)
+    """Сетка в текст. Пустые ячейки отбрасываются — позиции уже не нужны."""
+    return to_text([[_clean(cell) for cell in row] for row in rows])
+
+
+def _clean(cell) -> str:
+    """Пустую ячейку API отдаёт как None, и str() превратил бы её в «None»."""
+    return "" if cell is None else " ".join(str(cell).split())
 
 
 class SheetsReader:
@@ -88,20 +85,40 @@ class SheetsReader:
             self._service = build("sheets", "v4", credentials=credentials, cache_discovery=False)
         return self._service
 
-    def read(self, sheet_id: str, gid: str = "") -> str:
-        """Таблица -> текст. Бросает SheetsError с внятной причиной."""
+    def read(self, sheet_id: str, gid: str = "", instruction: str = "") -> tuple[str, str]:
+        """Таблица -> (текст, имя выбранного столбца).
+
+        Если в просьбе назван столбец, в текст попадает только он и столбец
+        времени. Бросает SheetsError с внятной причиной.
+        """
         if self.available:
             try:
-                return self._read_api(sheet_id, gid)
+                return self._read_api(sheet_id, gid, instruction)
             except SheetsError as exc:
                 logger.info("Таблица через API не открылась (%s), пробую выгрузку", exc)
-        return self._read_public(sheet_id, gid)
+        return self._read_public(sheet_id, gid, instruction)
 
     # ─── через API, от имени сервисного аккаунта ────────────────────────────
-    def _read_api(self, sheet_id: str, gid: str) -> str:
+    def _read_api(self, sheet_id: str, gid: str, instruction: str) -> tuple[str, str]:
+        """Читает лист вместе с объединёнными областями.
+
+        includeGridData обязателен: без него общий для нескольких классов
+        урок виден только в колонке первого из них.
+        """
         try:
             service = self._get_service()
-            meta = service.spreadsheets().get(spreadsheetId=sheet_id).execute()
+            meta = (
+                service.spreadsheets()
+                .get(
+                    spreadsheetId=sheet_id,
+                    includeGridData=True,
+                    fields=(
+                        "sheets(properties(sheetId,title),merges,"
+                        "data(rowData(values(formattedValue))))"
+                    ),
+                )
+                .execute()
+            )
         except HttpError as exc:
             raise SheetsError(_describe(exc)) from exc
         except Exception as exc:
@@ -111,32 +128,44 @@ class SheetsReader:
         if not sheets:
             raise SheetsError("в таблице нет ни одного листа")
 
-        title = sheets[0]["properties"]["title"]
+        sheet = sheets[0]
         if gid:
-            for sheet in sheets:
-                if str(sheet["properties"].get("sheetId")) == gid:
-                    title = sheet["properties"]["title"]
+            for candidate in sheets:
+                if str(candidate["properties"].get("sheetId")) == gid:
+                    sheet = candidate
                     break
+        title = sheet["properties"]["title"]
 
-        try:
-            values = (
-                service.spreadsheets()
-                .values()
-                .get(spreadsheetId=sheet_id, range=f"'{title}'")
-                .execute()
-                .get("values", [])
-            )
-        except HttpError as exc:
-            raise SheetsError(_describe(exc)) from exc
-
-        text = _rows_to_text(values)
-        if not text:
+        rows = [
+            [_clean(cell.get("formattedValue")) for cell in row.get("values", [])]
+            for block in sheet.get("data", [])
+            for row in block.get("rowData", [])
+        ]
+        if not rows:
             raise SheetsError(f"лист {title!r} пуст")
-        logger.info("Таблица прочитана через API: лист %r, %d строк", title, len(values))
-        return text
+
+        merges = [
+            (
+                m.get("startRowIndex", 0),
+                m.get("endRowIndex", 0) - 1,
+                m.get("startColumnIndex", 0),
+                m.get("endColumnIndex", 0) - 1,
+            )
+            for m in sheet.get("merges", [])
+        ]
+        grid = fill_merges(rows, merges)
+
+        found = find_column(grid, instruction) if instruction else None
+        if found is not None:
+            column, name = found
+            logger.info("Таблица: лист %r, столбец %r", title, name)
+            return narrow(grid, column), name
+
+        logger.info("Таблица: лист %r, %d строк целиком", title, len(rows))
+        return to_text(grid), ""
 
     # ─── выгрузка в CSV, для таблиц, открытых по ссылке ─────────────────────
-    def _read_public(self, sheet_id: str, gid: str) -> str:
+    def _read_public(self, sheet_id: str, gid: str, instruction: str = "") -> tuple[str, str]:
         url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
         if gid:
             url += f"&gid={gid}"
@@ -159,11 +188,20 @@ class SheetsReader:
         except UnicodeDecodeError:
             decoded = raw.decode("cp1251", errors="replace")
 
-        text = _rows_to_text(list(csv.reader(io.StringIO(decoded))))
+        # У выгрузки нет сведений об объединениях, но позиции ячеек в ней
+        # сохранены — этого хватает, чтобы выбрать нужный столбец.
+        rows = [[_clean(cell) for cell in row] for row in csv.reader(io.StringIO(decoded))]
+        found = find_column(rows, instruction) if instruction else None
+        if found is not None:
+            column, name = found
+            logger.info("Таблица из выгрузки: столбец %r", name)
+            return narrow(rows, column), name
+
+        text = to_text(rows)
         if not text:
             raise SheetsError("таблица пуста")
         logger.info("Таблица прочитана выгрузкой в CSV")
-        return text
+        return text, ""
 
 
 def _describe(exc: HttpError) -> str:
