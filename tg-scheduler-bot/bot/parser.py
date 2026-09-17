@@ -41,9 +41,12 @@ SYSTEM_PROMPT = """\
 Правила:
 - title — короткое название без времени, с заглавной буквы. Например: "Созвон с командой".
 - start и end — местное время в формате YYYY-MM-DDTHH:MM:SS, без указания зоны.
+- Время, названное с предлогом («в 18:00», «к шести», «в 6 вечера»), — это НАЧАЛО.
+- Голое время в начале строки, без предлога («1800 сколково», «22 физ шк»), — это КОНЕЦ дела. В таком случае start не указывай вообще: начало само подставится от конца предыдущего дела в списке.
+- «1555-1620 установить клод» — это диапазон: и начало, и конец.
 - Если событие на весь день, all_day = true, а start и end — даты YYYY-MM-DD \
 (end равен start, если событие однодневное).
-- Если время окончания не названо, end не указывай — длительность подставится сама.
+- Если названо только начало и не названа длительность, end не указывай — длительность подставится сама.
 - notes — уточнения из исходного текста (место, участники). Если их нет, пустая строка.
 - Относительные даты («завтра», «в пятницу», «через час») считай от текущего момента, \
 он дан в сообщении пользователя.
@@ -110,6 +113,19 @@ def _parse_moment(raw: str, tz: ZoneInfo, all_day: bool) -> datetime:
     return moment.astimezone(tz)
 
 
+def _maybe_moment(
+    raw, tz: ZoneInfo, all_day: bool, title: str, label: str
+) -> datetime | None:
+    """Разбирает момент, если он назван. Неразборчивый считается неназванным."""
+    if not raw:
+        return None
+    try:
+        return _parse_moment(str(raw), tz, all_day)
+    except (ValueError, TypeError):
+        logger.warning("Разбор: у %r неразборчивый(ое) %s %r", title, label, raw)
+        return None
+
+
 def events_from_payload(
     payload: dict, tz: ZoneInfo, default_minutes: int
 ) -> list[Event]:
@@ -123,6 +139,10 @@ def events_from_payload(
         raise ParseError("в ответе модели нет списка events")
 
     events: list[Event] = []
+    # Конец последнего дела с временем: от него отсчитывается начало
+    # следующего, если названо только время окончания.
+    previous_end: datetime | None = None
+
     for index, item in enumerate(raw_events):
         if not isinstance(item, dict):
             logger.warning("Разбор: элемент %d не объект, пропускаю", index)
@@ -134,26 +154,26 @@ def events_from_payload(
             continue
 
         all_day = bool(item.get("all_day"))
-        try:
-            start = _parse_moment(str(item.get("start") or ""), tz, all_day)
-        except (ValueError, TypeError):
-            logger.warning(
-                "Разбор: у %r неразборчивое начало %r, пропускаю",
-                title,
-                item.get("start"),
-            )
+        start = _maybe_moment(item.get("start"), tz, all_day, title, "начало")
+        end = _maybe_moment(item.get("end"), tz, all_day, title, "конец")
+
+        if start is None and end is None:
+            logger.warning("Разбор: у %r нет ни начала, ни конца, пропускаю", title)
             continue
 
-        end = None
-        raw_end = item.get("end")
-        if raw_end:
-            try:
-                end = _parse_moment(str(raw_end), tz, all_day)
-            except (ValueError, TypeError):
-                logger.warning("Разбор: у %r неразборчивый конец %r", title, raw_end)
+        if start is None:
+            # Назван только конец: «1800 сколково» — значит дело идёт
+            # от конца предыдущего до 18:00.
+            if previous_end is not None and previous_end < end:
+                start = previous_end
+            else:
+                start = end - timedelta(minutes=default_minutes)
 
         if end is None or end < start or (not all_day and end == start):
             end = start if all_day else start + timedelta(minutes=default_minutes)
+
+        if not all_day:
+            previous_end = end
 
         try:
             events.append(

@@ -287,3 +287,100 @@ class TestMergeEvents:
         from bot.parser import merge_events
 
         assert merge_events([[], []]) == []
+
+
+class TestChainedEnds:
+    """Голое время — это конец дела; начало берётся от конца предыдущего."""
+
+    def test_single_end_chains_from_previous(self):
+        """Ровно случай из переписки: «1555-1620 клод», следом «1800 сколково»."""
+        events = parse(
+            {
+                "events": [
+                    {
+                        "title": "Установить клод",
+                        "start": "2026-09-17T15:55:00",
+                        "end": "2026-09-17T16:20:00",
+                    },
+                    {"title": "Сколково", "end": "2026-09-17T18:00:00"},
+                ]
+            }
+        )
+        assert events[1].start == datetime(2026, 9, 17, 16, 20, tzinfo=MSK)
+        assert events[1].end == datetime(2026, 9, 17, 18, 0, tzinfo=MSK)
+
+    def test_whole_evening_chains_without_gaps(self):
+        """Семь дел подряд: конец каждого — начало следующего."""
+        ends = ["16:20", "18:00", "19:30", "20:45", "22:00", "22:30", "22:50"]
+        payload = {
+            "events": [
+                {"title": "Клод", "start": "2026-09-17T15:55:00", "end": "2026-09-17T16:20:00"}
+            ]
+            + [
+                {"title": f"Дело {i}", "end": f"2026-09-17T{value}:00"}
+                for i, value in enumerate(ends[1:], start=1)
+            ]
+        }
+        events = parse(payload)
+        assert len(events) == len(ends)
+        for earlier, later in zip(events, events[1:]):
+            assert later.start == earlier.end, "между делами не должно быть разрывов"
+
+    def test_no_overlaps(self):
+        """Прежнее поведение накладывало дела друг на друга."""
+        events = parse(
+            {
+                "events": [
+                    {"title": "А", "start": "2026-09-17T22:00:00", "end": "2026-09-17T22:30:00"},
+                    {"title": "Б", "end": "2026-09-17T22:50:00"},
+                ]
+            }
+        )
+        assert events[0].end <= events[1].start
+
+    def test_first_event_without_start_uses_default_duration(self):
+        """Цепляться не от чего — берём длительность по умолчанию назад."""
+        events = parse({"events": [{"title": "Сколково", "end": "2026-09-17T18:00:00"}]})
+        assert events[0].start == datetime(2026, 9, 17, 17, 0, tzinfo=MSK)
+
+    def test_end_earlier_than_previous_does_not_invert(self):
+        """Дело из другого дня не должно тянуться назад через всю ночь."""
+        events = parse(
+            {
+                "events": [
+                    {"title": "Вечер", "start": "2026-09-17T22:00:00", "end": "2026-09-17T23:00:00"},
+                    {"title": "Утро", "end": "2026-09-18T09:00:00"},
+                ]
+            }
+        )
+        assert events[1].start < events[1].end
+        assert events[1].start == datetime(2026, 9, 17, 23, 0, tzinfo=MSK)
+
+    def test_explicit_start_is_not_overridden(self):
+        """«в 18:00 созвон» — это начало, цепочка не вмешивается."""
+        events = parse(
+            {
+                "events": [
+                    {"title": "А", "start": "2026-09-17T10:00:00", "end": "2026-09-17T11:00:00"},
+                    {"title": "Созвон", "start": "2026-09-17T18:00:00"},
+                ]
+            }
+        )
+        assert events[1].start == datetime(2026, 9, 17, 18, 0, tzinfo=MSK)
+        assert events[1].end == datetime(2026, 9, 17, 19, 0, tzinfo=MSK)
+
+    def test_all_day_does_not_break_the_chain(self):
+        """Событие на весь день не должно становиться опорой для следующего."""
+        events = parse(
+            {
+                "events": [
+                    {"title": "Дело", "start": "2026-09-17T10:00:00", "end": "2026-09-17T11:00:00"},
+                    {"title": "Отпуск", "start": "2026-09-17", "all_day": True},
+                    {"title": "Следующее", "end": "2026-09-17T12:00:00"},
+                ]
+            }
+        )
+        assert events[2].start == datetime(2026, 9, 17, 11, 0, tzinfo=MSK)
+
+    def test_event_without_any_time_is_skipped(self):
+        assert parse({"events": [{"title": "Просто дело"}]}) == []
