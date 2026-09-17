@@ -53,19 +53,19 @@ async def describe(exc: OpenAIError, client: AsyncOpenAI, model: str) -> str:
 
     if status in MODEL_STATUSES:
         names = await available_models(client)
-        if names and model not in names:
-            shown = ", ".join(names[:MODELS_SHOWN])
-            more = f" и ещё {len(names) - MODELS_SHOWN}" if len(names) > MODELS_SHOWN else ""
-            return (
-                f"модель {model!r} недоступна. Доступны: {shown}{more}. "
-                "Поправь переменную окружения с именем модели"
-            )
-        if names and model in names:
-            # Модель в списке есть, а обращение отклонено — дело не в имени.
-            return (
+        if names:
+            # В обоих случаях человеку нужно одно и то же: чем заменить.
+            others = [name for name in names if name != model]
+            shown = ", ".join(others[:MODELS_SHOWN])
+            more = f" и ещё {len(others) - MODELS_SHOWN}" if len(others) > MODELS_SHOWN else ""
+            reason = (
                 f"модель {model!r} числится доступной, но провайдер отказал "
-                f"({status}). Похоже, она закрыта твоим тарифом"
+                f"({status}) — похоже, она закрыта твоим тарифом"
+                if model in names
+                else f"модель {model!r} недоступна"
             )
+            hint = f" Попробуй другую: {shown}{more}." if others else ""
+            return f"{reason}.{hint} Имя модели задаётся переменной окружения"
         if not names:
             # Список не получить, но статус всё равно указывает на модель —
             # лучше сказать это, чем вывалить сырой текст провайдера.

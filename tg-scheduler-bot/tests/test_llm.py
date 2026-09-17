@@ -94,10 +94,25 @@ class TestOtherStatuses:
     @pytest.mark.asyncio
     async def test_existing_model_refused_is_called_a_plan_limit(self):
         """Модель в списке есть, а доступ закрыт — дело не в имени."""
+        client = FakeClient(["openai/gpt-oss-120b", "qwen/qwen3.6-27b"])
+        message = await describe(FakeError("Forbidden", 403), client, "openai/gpt-oss-120b")
+        assert "тарифом" in message
+        # и всё равно подсказывает, чем заменить
+        assert "qwen/qwen3.6-27b" in message
+
+    @pytest.mark.asyncio
+    async def test_refused_model_is_not_offered_as_its_own_replacement(self):
+        client = FakeClient(["openai/gpt-oss-120b", "qwen/qwen3.6-27b"])
+        message = await describe(FakeError("Forbidden", 403), client, "openai/gpt-oss-120b")
+        suggestion = message.split("Попробуй другую:", 1)[1]
+        assert "gpt-oss-120b" not in suggestion
+
+    @pytest.mark.asyncio
+    async def test_sole_refused_model_has_nothing_to_suggest(self):
         client = FakeClient(["openai/gpt-oss-120b"])
         message = await describe(FakeError("Forbidden", 403), client, "openai/gpt-oss-120b")
         assert "тарифом" in message
-        assert "Доступны" not in message
+        assert "Попробуй другую" not in message
 
     @pytest.mark.asyncio
     async def test_falls_back_when_list_unavailable(self):
