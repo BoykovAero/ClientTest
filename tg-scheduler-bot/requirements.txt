@@ -1,0 +1,23 @@
+# Telegram. Extra [job-queue] обязателен — на нём работает ежедневный вопрос в 08:45.
+python-telegram-bot[job-queue]~=21.9
+
+# OpenAI: Whisper (распознавание голоса) + GPT (разбор в список дел)
+openai~=1.59
+
+# Google Calendar
+google-api-python-client~=2.157
+google-auth-oauthlib~=1.2
+google-auth-httplib2~=0.2
+
+# iCloud Calendar через CalDAV
+caldav~=1.4
+
+# Конфигурация
+python-dotenv~=1.0
+
+# Тайм-зоны: на минимальном образе Linux базы zoneinfo может не быть
+tzdata
+
+# Чтение расписаний из присланных файлов
+python-docx~=1.1
+openpyxl~=3.1
