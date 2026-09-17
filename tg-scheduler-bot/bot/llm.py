@@ -47,6 +47,18 @@ async def available_models(client: AsyncOpenAI) -> list[str]:
     return sorted(model.id for model in response.data)
 
 
+# Обрывать список ради одного-двух имён бессмысленно: «и ещё 1» занимает
+# столько же места, сколько само имя, а пользы не несёт.
+TAIL_TOLERANCE = 3
+
+
+def _format_models(names: list[str]) -> tuple[str, str]:
+    """Имена для показа и хвост вида « и ещё N»."""
+    if len(names) <= MODELS_SHOWN + TAIL_TOLERANCE:
+        return ", ".join(names), ""
+    return ", ".join(names[:MODELS_SHOWN]), f" и ещё {len(names) - MODELS_SHOWN}"
+
+
 async def describe(exc: OpenAIError, client: AsyncOpenAI, model: str) -> str:
     """Короткое объяснение ошибки — оно уходит пользователю в Telegram."""
     status = _status(exc)
@@ -56,8 +68,7 @@ async def describe(exc: OpenAIError, client: AsyncOpenAI, model: str) -> str:
         if names:
             # В обоих случаях человеку нужно одно и то же: чем заменить.
             others = [name for name in names if name != model]
-            shown = ", ".join(others[:MODELS_SHOWN])
-            more = f" и ещё {len(others) - MODELS_SHOWN}" if len(others) > MODELS_SHOWN else ""
+            shown, more = _format_models(others)
             reason = (
                 f"модель {model!r} числится доступной, но провайдер отказал "
                 f"({status}) — похоже, она закрыта твоим тарифом"

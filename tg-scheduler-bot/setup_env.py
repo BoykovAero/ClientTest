@@ -261,7 +261,7 @@ def main() -> int:
         if name == "Groq":
             values["OPENAI_BASE_URL"] = base_url
             values["OPENAI_MODEL"] = "openai/gpt-oss-120b"
-            values["OPENAI_TRANSCRIBE_MODEL"] = "whisper-large-v3-turbo"
+            values["OPENAI_TRANSCRIBE_MODEL"] = "whisper-large-v3"
         else:
             values["OPENAI_BASE_URL"] = ""
             values["OPENAI_MODEL"] = "gpt-4o-mini"

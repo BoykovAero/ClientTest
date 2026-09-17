@@ -61,6 +61,17 @@ class TestModelNotFound:
         assert "и ещё 18" in message
 
     @pytest.mark.asyncio
+    async def test_short_tail_is_shown_instead_of_being_counted(self):
+        """13 моделей: «и ещё 1» занимает столько же места, сколько имя."""
+        from bot.llm import TAIL_TOLERANCE
+
+        names = [f"model-{i:02d}" for i in range(MODELS_SHOWN + TAIL_TOLERANCE)]
+        client = FakeClient(names)
+        message = await describe(FakeError(MODEL_NOT_FOUND, 404), client, "нет-такой")
+        assert "и ещё" not in message
+        assert names[-1] in message
+
+    @pytest.mark.asyncio
     async def test_survives_failure_to_list(self):
         """Если список получить не удалось, сообщение всё равно осмысленное."""
         client = FakeClient(fail=True)
