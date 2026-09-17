@@ -149,3 +149,67 @@ class TestTruncation:
         data = ("строка расписания\n" * 5000).encode("utf-8")
         text = extract_text("plan.txt", data)
         assert len(text) == MAX_TEXT_CHARS
+
+
+class TestNarrowToColumn:
+    """Расписание класса — один столбец; гонять через модель всю таблицу незачем."""
+
+    HEADER = "Время | 11а | 11б | 11Е инж | 10а"
+    TEXT = "\n".join(
+        [HEADER]
+        + [f"{hour}:00 | Алгебра | История | Инж графика | Химия" for hour in range(9, 16)]
+    )
+
+    def test_finds_the_column(self):
+        from bot.documents import narrow_to_column
+
+        narrowed, name = narrow_to_column(self.TEXT, "добавь расписание 11 е инж")
+        assert name == "11Е инж"
+        assert "Инж графика" in narrowed
+        assert "Алгебра" not in narrowed
+
+    def test_time_column_is_kept(self):
+        from bot.documents import narrow_to_column
+
+        narrowed, _ = narrow_to_column(self.TEXT, "расписание 11е инж")
+        assert "9:00" in narrowed
+
+    def test_shrinks_the_text(self):
+        from bot.documents import narrow_to_column
+
+        narrowed, _ = narrow_to_column(self.TEXT, "расписание 11е инж")
+        assert len(narrowed) < len(self.TEXT) / 2
+
+    def test_spacing_and_case_do_not_matter(self):
+        from bot.documents import narrow_to_column
+
+        for instruction in ("11Е ИНЖ", "11 е инж", "расписание 11еинж на неделю"):
+            _, name = narrow_to_column(self.TEXT, instruction)
+            assert name == "11Е инж", instruction
+
+    def test_ambiguous_request_keeps_everything(self):
+        """Лучше разобрать лишнее, чем молча выбросить нужное."""
+        from bot.documents import narrow_to_column
+
+        narrowed, name = narrow_to_column(self.TEXT, "добавь всё расписание")
+        assert narrowed == self.TEXT
+        assert name == ""
+
+    def test_two_matching_columns_keep_everything(self):
+        from bot.documents import narrow_to_column
+
+        text = "Время | 11а | 11б\n9:00 | А | Б"
+        narrowed, name = narrow_to_column(text, "возьми 11а и 11б")
+        assert narrowed == text
+        assert name == ""
+
+    def test_empty_instruction(self):
+        from bot.documents import narrow_to_column
+
+        assert narrow_to_column(self.TEXT, "") == (self.TEXT, "")
+
+    def test_text_without_table_is_untouched(self):
+        from bot.documents import narrow_to_column
+
+        plain = "завтра в 15:00 созвон"
+        assert narrow_to_column(plain, "11е инж") == (plain, "")

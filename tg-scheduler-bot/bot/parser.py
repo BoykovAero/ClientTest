@@ -259,7 +259,11 @@ class PlanParser:
         self._default_minutes = default_minutes
 
     async def parse(
-        self, text: str, now: datetime | None = None, instruction: str = ""
+        self,
+        text: str,
+        now: datetime | None = None,
+        instruction: str = "",
+        on_progress=None,
     ) -> list[Event]:
         """Текст -> список событий. Большой текст разбирается частями."""
         moment = now or datetime.now(self._tz)
@@ -276,8 +280,10 @@ class PlanParser:
 
         logger.info("Разбор: текст поделён на %d частей", len(chunks))
         limit = asyncio.Semaphore(CHUNK_CONCURRENCY)
+        done = 0
 
         async def one(chunk: str) -> list[Event]:
+            nonlocal done
             async with limit:
                 try:
                     return await self._parse_chunk(chunk, moment, instruction)
@@ -285,6 +291,10 @@ class PlanParser:
                     # Одна неудачная часть не должна отменять остальные.
                     logger.warning("Разбор: часть не разобралась: %s", exc)
                     return []
+                finally:
+                    done += 1
+                    if on_progress is not None:
+                        await on_progress(done, len(chunks))
 
         groups = await asyncio.gather(*(one(chunk) for chunk in chunks))
         events = merge_events(list(groups))

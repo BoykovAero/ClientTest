@@ -19,9 +19,15 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 from bot.calendars.base import CalendarEntry, CalendarError, Event, SaveResult
-from bot.documents import DocumentError, extract_text, is_large, kind_of
+from bot.documents import (
+    DocumentError,
+    extract_text,
+    is_large,
+    kind_of,
+    narrow_to_column,
+)
 from bot.llm import WORKS, WORKS_WITH_VISION, available_models, probe_all
-from bot.parser import ParseError
+from bot.parser import ParseError, split_into_chunks
 from bot.sheets import SheetsError, find_link, looks_like_sheet, strip_link
 from bot.transcribe import TranscriptionError
 from bot.vision import VisionError
@@ -417,15 +423,24 @@ class SchedulerBot:
         поэтому здесь всегда спрашиваем подтверждение.
         """
         await self._typing(update)
+
+        # Просят один столбец — незачем гонять через модель всю таблицу.
+        text, column = narrow_to_column(text, instruction)
+
         notice = None
+        progress = None
         if is_large(text):
-            # Большой файл разбирается частями и это заметно по времени.
+            parts = len(split_into_chunks(text))
+            about = f" (столбец «{column}»)" if column else ""
             notice = await update.message.reply_text(
-                "Расписание большое, разбираю по частям — это займёт до минуты…"
+                f"Расписание большое{about}: разбираю {_plural_parts(parts)}…"
             )
+            progress = _progress_reporter(notice, column)
 
         try:
-            events = await self._parser.parse(text, instruction=instruction)
+            events = await self._parser.parse(
+                text, instruction=instruction, on_progress=progress
+            )
         except ParseError as exc:
             logger.warning("Разбор файла не удался: %s", exc)
             await _drop(notice)
@@ -558,6 +573,28 @@ class SchedulerBot:
             await update.message.chat.send_action(ChatAction.TYPING)
         except TelegramError:
             pass  # индикатор набора — мелочь, ради неё ничего не ломаем
+
+
+def _progress_reporter(notice, column: str):
+    """Обновляет уведомление по мере разбора частей."""
+    about = f" (столбец «{column}»)" if column else ""
+
+    async def report(done: int, total: int) -> None:
+        try:
+            await notice.edit_text(f"Разбираю расписание{about}: {done} из {total}…")
+        except TelegramError:
+            # Правка уведомления — мелочь, ради неё ничего не ломаем.
+            pass
+
+    return report
+
+
+def _plural_parts(count: int) -> str:
+    if count % 10 == 1 and count % 100 != 11:
+        return f"{count} часть"
+    if count % 10 in (2, 3, 4) and count % 100 not in (12, 13, 14):
+        return f"{count} части"
+    return f"{count} частей"
 
 
 async def _drop(message) -> None:

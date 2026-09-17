@@ -33,6 +33,9 @@ from bot.vision import ImageReader
 
 logger = logging.getLogger("bot")
 
+# Сколько ждать ответа модели на одну часть расписания, секунд.
+REQUEST_TIMEOUT = 90.0
+
 
 def setup_logging(level: str) -> None:
     logging.basicConfig(
@@ -50,8 +53,13 @@ def setup_logging(level: str) -> None:
 def build_application(config: Config) -> Application:
     # Адрес передаётся всегда: SDK сам читает OPENAI_BASE_URL из окружения,
     # и пустая переменная там дала бы клиент с пустым адресом.
+    # Таймаут обязателен: по умолчанию SDK ждёт десять минут, и один
+    # зависший запрос держит разбор всего расписания.
     openai_client = AsyncOpenAI(
-        api_key=config.openai_api_key, base_url=config.openai_base_url
+        api_key=config.openai_api_key,
+        base_url=config.openai_base_url,
+        timeout=REQUEST_TIMEOUT,
+        max_retries=1,
     )
     logger.info(
         "Модели: разбор %s, распознавание %s, зрение %s (%s)",

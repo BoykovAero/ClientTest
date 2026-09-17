@@ -160,3 +160,62 @@ def _from_xlsx(data: bytes) -> str:
     finally:
         workbook.close()
     return "\n".join(lines)
+
+
+# ─── сужение таблицы до нужного столбца ─────────────────────────────────────
+# Расписание класса — это один столбец из двадцати. Разбирать всю таблицу,
+# когда просят «11Е инж», — двенадцать обращений к модели вместо одного.
+
+# Сколько первых строк осмотреть в поисках шапки.
+HEADER_SEARCH_LINES = 5
+CELL_SEPARATOR = " | "
+
+
+def _normalise(value: str) -> str:
+    """«11 е инж» и «11Е ИНЖ» — одно и то же."""
+    return "".join(ch for ch in value.lower() if ch.isalnum())
+
+
+def narrow_to_column(text: str, instruction: str) -> tuple[str, str]:
+    """Оставляет столбец времени и тот, что назван в просьбе.
+
+    Возвращает (текст, имя столбца). Если столбец не опознан однозначно,
+    текст возвращается целиком, а имя — пустым: лучше разобрать лишнее,
+    чем молча выбросить нужное.
+    """
+    wanted = _normalise(instruction)
+    if not wanted:
+        return text, ""
+
+    rows = [line.split(CELL_SEPARATOR) for line in text.splitlines()]
+    header_index, header = -1, []
+    for index, row in enumerate(rows[:HEADER_SEARCH_LINES]):
+        if len(row) > len(header):
+            header_index, header = index, row
+    if len(header) < 3:
+        return text, ""
+
+    # Столбец подходит, если его название целиком встречается в просьбе.
+    matches = [
+        (index, cell.strip())
+        for index, cell in enumerate(header)
+        if index > 0 and len(_normalise(cell)) >= 2 and _normalise(cell) in wanted
+    ]
+    if len(matches) != 1:
+        return text, ""
+
+    column, name = matches[0]
+    kept = []
+    for index, row in enumerate(rows):
+        if index < header_index:
+            continue
+        cells = [row[0].strip() if row else ""]
+        cells.append(row[column].strip() if column < len(row) else "")
+        if any(cells):
+            kept.append(CELL_SEPARATOR.join(cell for cell in cells if cell))
+
+    narrowed = "\n".join(kept)
+    logger.info(
+        "Таблица сужена до столбца %r: %d -> %d символов", name, len(text), len(narrowed)
+    )
+    return narrowed, name
