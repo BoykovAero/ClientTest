@@ -69,3 +69,28 @@ class TestAvailability:
 
     def test_with_key_api_is_possible(self):
         assert SheetsReader({"client_email": "a@b.com"}).available is True
+
+
+class TestTruncatedLink:
+    """Обрезанную ссылку надо отличать от «таблицы в сообщении нет»."""
+
+    SHORT = "https://docs.google.com/spreadsheets/d/1nLbvctk-.../edit?gid=1585236605"
+
+    def test_truncated_link_is_not_parsed(self):
+        assert find_link(self.SHORT) is None
+
+    def test_but_it_is_recognised_as_a_sheet(self):
+        from bot.sheets import looks_like_sheet
+
+        assert looks_like_sheet(self.SHORT) is True
+
+    def test_full_link_is_also_recognised(self):
+        from bot.sheets import looks_like_sheet
+
+        assert looks_like_sheet(REAL) is True
+
+    @pytest.mark.parametrize("text", ["просто текст", "", "https://example.com"])
+    def test_plain_text_is_not(self, text):
+        from bot.sheets import looks_like_sheet
+
+        assert looks_like_sheet(text) is False

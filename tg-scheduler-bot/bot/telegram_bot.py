@@ -22,7 +22,7 @@ from bot.calendars.base import CalendarEntry, CalendarError, Event, SaveResult
 from bot.documents import DocumentError, extract_text, is_large, kind_of
 from bot.llm import WORKS, WORKS_WITH_VISION, available_models, probe_all
 from bot.parser import ParseError
-from bot.sheets import SheetsError, find_link, strip_link
+from bot.sheets import SheetsError, find_link, looks_like_sheet, strip_link
 from bot.transcribe import TranscriptionError
 from bot.vision import VisionError
 
@@ -301,6 +301,17 @@ class SchedulerBot:
         link = find_link(text)
         if link is not None:
             await self._from_sheet(update, *link, instruction=strip_link(text))
+            return
+
+        if looks_like_sheet(text):
+            # Ссылка есть, но идентификатор не вычитывается — обычно её
+            # обрезали при копировании. Молча разбирать как текст бесполезно.
+            await update.message.reply_text(
+                "Вижу ссылку на Google Таблицу, но она неполная — "
+                "идентификатор обрезан.\n\n"
+                "Открой таблицу в браузере, скопируй адрес из адресной строки "
+                "целиком и пришли ещё раз."
+            )
             return
 
         await self._process(update, text)

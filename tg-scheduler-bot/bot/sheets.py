@@ -27,6 +27,9 @@ TIMEOUT = 30
 # остаётся в тексте и попадает в просьбу пользователя.
 LINK = re.compile(r"https://docs\.google\.com/spreadsheets/d/([A-Za-z0-9_-]{20,})\S*")
 GID = re.compile(r"[#?&]gid=(\d+)")
+# Ссылку часто присылают обрезанной — с многоточием вместо идентификатора.
+# Такую надо отличать от «в сообщении вообще нет таблицы».
+MENTION = re.compile(r"docs\.google\.com/spreadsheets")
 
 
 class SheetsError(RuntimeError):
@@ -40,6 +43,11 @@ def find_link(text: str) -> tuple[str, str] | None:
         return None
     gid_match = GID.search(text)
     return match.group(1), (gid_match.group(1) if gid_match else "")
+
+
+def looks_like_sheet(text: str) -> bool:
+    """Упоминается таблица, но ссылку разобрать не удалось."""
+    return bool(MENTION.search(text or ""))
 
 
 def strip_link(text: str) -> str:
