@@ -21,7 +21,7 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from bot.calendars.base import CalendarError, Event, SaveResult
+from bot.calendars.base import CalendarEntry, CalendarError, Event, SaveResult
 
 logger = logging.getLogger(__name__)
 
@@ -169,8 +169,27 @@ class GoogleCalendar:
                 logger.exception("Google: непредвиденная ошибка на %r", event.title)
                 return SaveResult.failed(TARGET, str(exc))
 
-    def list_day(self, day_start: datetime) -> list[tuple[str, str]]:
-        """События за сутки от day_start. Возвращает пары (время, заголовок)."""
+    def delete(self, event_id: str) -> None:
+        """Удаляет событие по идентификатору. Уже удалённое считается успехом."""
+        with self._lock:
+            try:
+                self._get_service().events().delete(
+                    calendarId=self._calendar_id, eventId=event_id
+                ).execute()
+                logger.info("Google: удалено событие id=%s", event_id)
+            except HttpError as exc:
+                if _status(exc) in (404, 410):
+                    # Уже нет — цель достигнута.
+                    logger.info("Google: событие id=%s уже отсутствует", event_id)
+                    return
+                raise CalendarError(_describe(exc)) from exc
+            except CalendarError:
+                raise
+            except Exception as exc:
+                raise CalendarError(str(exc)) from exc
+
+    def list_day(self, day_start: datetime) -> list[CalendarEntry]:
+        """События за сутки от day_start."""
         with self._lock:
             try:
                 response = (
@@ -192,12 +211,20 @@ class GoogleCalendar:
             except Exception as exc:
                 raise CalendarError(str(exc)) from exc
 
-        items = []
+        entries = []
         for item in response.get("items", []):
             start = item.get("start", {})
             when = "весь день" if "date" in start else start.get("dateTime", "")[11:16]
-            items.append((when, item.get("summary", "(без названия)")))
-        return items
+            private = item.get("extendedProperties", {}).get("private", {})
+            entries.append(
+                CalendarEntry(
+                    event_id=item.get("id", ""),
+                    when=when,
+                    title=item.get("summary", "(без названия)"),
+                    uid=private.get("tg_scheduler_uid", ""),
+                )
+            )
+        return entries
 
     def _to_body(self, event: Event) -> dict:
         body: dict = {

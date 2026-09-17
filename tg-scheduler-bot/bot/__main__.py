@@ -128,6 +128,10 @@ def build_application(config: Config) -> Application:
     application.add_handler(
         CallbackQueryHandler(scheduler_bot.on_decision, pattern=r"^(save|drop):")
     )
+    application.add_handler(CallbackQueryHandler(scheduler_bot.on_pick, pattern=r"^pick:"))
+    application.add_handler(
+        CallbackQueryHandler(scheduler_bot.on_delete, pattern=r"^(kill|keep):")
+    )
     application.add_error_handler(on_error)
 
     # Тайм-зона задаётся явно: на сервере системное время в UTC (контракт A.2.3).

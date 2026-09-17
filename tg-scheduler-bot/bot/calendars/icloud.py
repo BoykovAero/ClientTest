@@ -110,6 +110,28 @@ class ICloudCalendar:
                 logger.exception("iCloud: непредвиденная ошибка на %r", event.title)
                 return SaveResult.failed(TARGET, str(exc))
 
+    def delete_by_uid(self, uid: str) -> bool:
+        """Удаляет событие по UID. False — если такого события нет."""
+        with self._lock:
+            try:
+                calendar = self._get_calendar()
+                event = calendar.event_by_uid(uid)
+            except caldav_error.NotFoundError:
+                logger.info("iCloud: событие uid=%s не найдено", uid)
+                return False
+            except CalendarError:
+                raise
+            except Exception as exc:
+                raise CalendarError(f"не смог найти событие: {exc}") from exc
+
+            try:
+                event.delete()
+            except Exception as exc:
+                raise CalendarError(f"не смог удалить событие: {exc}") from exc
+
+            logger.info("iCloud: удалено событие uid=%s", uid)
+            return True
+
     @staticmethod
     def _exists(calendar, uid: str) -> bool:
         try:

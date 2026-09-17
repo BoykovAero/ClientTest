@@ -129,3 +129,21 @@ class SaveResult:
         if self.ok:
             return f"{self.target} ✓"
         return f"{self.target} ✗ ({self.error})"
+
+
+@dataclass(frozen=True)
+class CalendarEntry:
+    """Запись календаря, показанная пользователю для выбора.
+
+    ``uid`` заполнен только у событий, созданных ботом: по нему находится
+    их пара в iCloud. У чужих событий его нет, и удалить получится лишь
+    ту копию, которую видно.
+    """
+
+    event_id: str
+    when: str
+    title: str
+    uid: str = ""
+
+    def as_line(self) -> str:
+        return f"{self.when}  {self.title}" if self.when else self.title

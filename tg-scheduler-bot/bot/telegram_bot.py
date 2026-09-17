@@ -18,7 +18,7 @@ from telegram.constants import ChatAction
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
-from bot.calendars.base import CalendarError, Event, SaveResult
+from bot.calendars.base import CalendarEntry, CalendarError, Event, SaveResult
 from bot.documents import DocumentError, extract_text, is_large, kind_of
 from bot.llm import WORKS, WORKS_WITH_VISION, available_models, probe_all
 from bot.parser import ParseError
@@ -40,12 +40,14 @@ START_TEXT = (
     "скриншот. Я разберу его и покажу список, прежде чем записывать.\n\n"
     "Команды:\n"
     "/plan — спросить прямо сейчас\n"
-    "/today — что уже записано на сегодня\n"
+    "/today — что записано на сегодня, с удалением\n"
     "/models — какие модели доступны твоему ключу"
 )
 
 # Ключ в user_data, под которым ждут подтверждения разобранные из файла события.
 PENDING_KEY = "pending_events"
+# Сколько событий показать кнопками: у Telegram предел на размер клавиатуры.
+DELETE_LIMIT = 20
 # Сколько событий показать в списке: у Telegram предел на длину сообщения.
 PREVIEW_LIMIT = 30
 
@@ -64,6 +66,8 @@ class SchedulerBot:
         # Разобранные из файлов события ждут здесь подтверждения. Память
         # процесса: после перезапуска список просто считается устаревшим.
         self._pending: dict[str, list[Event]] = {}
+        # Показанные списки событий: по номеру из них выбирают, что удалить.
+        self._listings: dict[str, list[CalendarEntry]] = {}
 
     # ─── авторизация ────────────────────────────────────────────────────────
     def _authorized(self, update: Update) -> bool:
@@ -106,9 +110,117 @@ class SchedulerBot:
             await update.message.reply_text("На сегодня ничего не записано.")
             return
 
+        token = uuid.uuid4().hex[:8]
+        self._listings[token] = items[:DELETE_LIMIT]
+
         lines = [f"Сегодня, {now:%d.%m}:", ""]
-        lines += [f"{when}  {title}" if when else title for when, title in items]
-        await update.message.reply_text("\n".join(lines))
+        lines += [f"{index + 1}. {entry.as_line()}" for index, entry in enumerate(items)]
+        if len(items) > DELETE_LIMIT:
+            lines.append("")
+            lines.append(f"Удалить можно первые {DELETE_LIMIT}.")
+        lines.append("")
+        lines.append("Чтобы удалить — нажми на номер.")
+
+        await update.message.reply_text(
+            "\n".join(lines), reply_markup=self._number_keyboard(token, len(self._listings[token]))
+        )
+
+    @staticmethod
+    def _number_keyboard(token: str, count: int) -> InlineKeyboardMarkup:
+        """Ряды кнопок с номерами событий, по пять в ряд."""
+        buttons = [
+            InlineKeyboardButton(str(number), callback_data=f"pick:{token}:{number}")
+            for number in range(1, count + 1)
+        ]
+        rows = [buttons[i : i + 5] for i in range(0, len(buttons), 5)]
+        return InlineKeyboardMarkup(rows)
+
+    async def on_pick(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Выбрано событие из списка — спрашиваем подтверждение."""
+        if not self._authorized(update):
+            return
+
+        query = update.callback_query
+        await query.answer()
+        _, _, rest = (query.data or "").partition(":")
+        token, _, number = rest.partition(":")
+        entry = self._entry(token, number)
+
+        if entry is None:
+            await query.edit_message_text(
+                f"{query.message.text}\n\n(список устарел — открой /today заново)"
+            )
+            return
+
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("Удалить", callback_data=f"kill:{token}:{number}"),
+                    InlineKeyboardButton("Отмена", callback_data=f"keep:{token}:{number}"),
+                ]
+            ]
+        )
+        await query.message.reply_text(
+            f"Удалить «{entry.title}» ({entry.when})?\n\n"
+            "Событие пропадёт из обоих календарей, вернуть его я не смогу.",
+            reply_markup=keyboard,
+        )
+
+    async def on_delete(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Подтверждение или отказ от удаления."""
+        if not self._authorized(update):
+            return
+
+        query = update.callback_query
+        await query.answer()
+        action, _, rest = (query.data or "").partition(":")
+        token, _, number = rest.partition(":")
+        entry = self._entry(token, number)
+
+        if entry is None:
+            await query.edit_message_text("Список устарел — открой /today заново.")
+            return
+
+        if action == "keep":
+            await query.edit_message_text(f"Оставил «{entry.title}».")
+            return
+
+        await query.edit_message_text(f"Удаляю «{entry.title}»…")
+        results = await self._remove(entry)
+        await query.edit_message_text(
+            f"«{entry.title}» ({entry.when})\n" + " · ".join(results)
+        )
+
+    def _entry(self, token: str, number: str) -> CalendarEntry | None:
+        """Событие по номеру из списка. None — если список устарел."""
+        entries = self._listings.get(token)
+        if not entries or not number.isdigit():
+            return None
+        index = int(number) - 1
+        return entries[index] if 0 <= index < len(entries) else None
+
+    async def _remove(self, entry: CalendarEntry) -> list[str]:
+        """Удаляет событие из обоих календарей, по строке отчёта на каждый."""
+        results = []
+        try:
+            await asyncio.to_thread(self._google.delete, entry.event_id)
+            results.append("Google ✓")
+        except CalendarError as exc:
+            logger.warning("Не удалось удалить в Google: %s", exc)
+            results.append(f"Google ✗ ({exc})")
+
+        if not entry.uid:
+            # Чужое событие: пары в iCloud у него нет.
+            results.append("iCloud — пары нет")
+            return results
+
+        try:
+            removed = await asyncio.to_thread(self._icloud.delete_by_uid, entry.uid)
+            results.append("iCloud ✓" if removed else "iCloud — уже не было")
+        except CalendarError as exc:
+            logger.warning("Не удалось удалить в iCloud: %s", exc)
+            results.append(f"iCloud ✗ ({exc})")
+        return results
 
     async def models(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Проверяет каждую модель ключа настоящим запросом.
