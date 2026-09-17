@@ -10,6 +10,8 @@ import logging
 
 from openai import AsyncOpenAI, OpenAIError
 
+from bot.llm import describe
+
 logger = logging.getLogger(__name__)
 
 # Ограничение Whisper API. Голосовое в Telegram ограничено длительностью
@@ -44,7 +46,7 @@ class Transcriber:
                 language="ru",
             )
         except OpenAIError as exc:
-            raise TranscriptionError(_describe(exc)) from exc
+            raise TranscriptionError(await describe(exc, self._client, self._model)) from exc
 
         text = (getattr(result, "text", "") or "").strip()
         if not text:
@@ -52,15 +54,3 @@ class Transcriber:
 
         logger.info("Whisper: распознано %d символов", len(text))
         return text
-
-
-def _describe(exc: OpenAIError) -> str:
-    status = getattr(exc, "status_code", None)
-    known = {
-        401: "ключ OpenAI неверный или отозван",
-        413: "запись слишком большая",
-        429: "лимит или нулевой баланс OpenAI",
-    }
-    if status in known:
-        return f"{status}: {known[status]}"
-    return str(exc).split("\n", 1)[0][:200] or "ошибка Whisper"

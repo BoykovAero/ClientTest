@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 from openai import AsyncOpenAI, OpenAIError
 
 from bot.calendars.base import Event
+from bot.llm import describe
 
 logger = logging.getLogger(__name__)
 
@@ -173,7 +174,7 @@ class PlanParser:
                 ],
             )
         except OpenAIError as exc:
-            raise ParseError(_describe(exc)) from exc
+            raise ParseError(await describe(exc, self._client, self._model)) from exc
 
         content = (response.choices[0].message.content or "").strip()
         if not content:
@@ -186,17 +187,3 @@ class PlanParser:
             raise ParseError("модель вернула не JSON") from exc
 
         return events_from_payload(payload, self._tz, self._default_minutes)
-
-
-def _describe(exc: OpenAIError) -> str:
-    """Короткое объяснение ошибки OpenAI — оно уходит пользователю в Telegram."""
-    status = getattr(exc, "status_code", None)
-    known = {
-        401: "ключ OpenAI неверный или отозван",
-        429: "лимит или нулевой баланс OpenAI",
-        500: "сбой на стороне OpenAI",
-        503: "OpenAI перегружен",
-    }
-    if status in known:
-        return f"{status}: {known[status]}"
-    return str(exc).split("\n", 1)[0][:200] or "ошибка OpenAI"

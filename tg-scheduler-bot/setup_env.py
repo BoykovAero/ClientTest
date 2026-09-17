@@ -260,7 +260,7 @@ def main() -> int:
         name, base_url = detect_provider(values["OPENAI_API_KEY"])
         if name == "Groq":
             values["OPENAI_BASE_URL"] = base_url
-            values["OPENAI_MODEL"] = "llama-3.3-70b-versatile"
+            values["OPENAI_MODEL"] = "openai/gpt-oss-120b"
             values["OPENAI_TRANSCRIBE_MODEL"] = "whisper-large-v3-turbo"
         else:
             values["OPENAI_BASE_URL"] = ""
