@@ -10,16 +10,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from datetime import datetime
 
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 from bot.calendars.base import CalendarError, Event, SaveResult
+from bot.documents import DocumentError, extract_text, kind_of
 from bot.parser import ParseError
 from bot.transcribe import TranscriptionError
+from bot.vision import VisionError
 
 logger = logging.getLogger(__name__)
 
@@ -32,19 +35,30 @@ START_TEXT = (
     "Я планировщик дня.\n\n"
     "Каждый день в {time} спрошу, как пройдёт день. Ответишь текстом или "
     "голосовым — разберу и запишу события в Google Calendar и в iCloud.\n\n"
+    "Ещё можно прислать файл с расписанием: Word, Excel, таблицу или "
+    "скриншот. Я разберу его и покажу список, прежде чем записывать.\n\n"
     "Команды:\n"
     "/plan — спросить прямо сейчас\n"
     "/today — что уже записано на сегодня"
 )
 
+# Ключ в user_data, под которым ждут подтверждения разобранные из файла события.
+PENDING_KEY = "pending_events"
+# Сколько событий показать в списке: у Telegram предел на длину сообщения.
+PREVIEW_LIMIT = 30
+
 
 class SchedulerBot:
-    def __init__(self, config, parser, transcriber, google, icloud) -> None:
+    def __init__(self, config, parser, transcriber, image_reader, google, icloud) -> None:
         self._config = config
         self._parser = parser
         self._transcriber = transcriber
+        self._image_reader = image_reader
         self._google = google
         self._icloud = icloud
+        # Разобранные из файлов события ждут здесь подтверждения. Память
+        # процесса: после перезапуска список просто считается устаревшим.
+        self._pending: dict[str, list[Event]] = {}
 
     # ─── авторизация ────────────────────────────────────────────────────────
     def _authorized(self, update: Update) -> bool:
@@ -128,6 +142,123 @@ class SchedulerBot:
         await update.message.reply_text(f"Распознал:\n{text}")
         await self._process(update, text)
 
+    async def on_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Файл с расписанием: Word, Excel, таблица, текст или картинка."""
+        if not self._authorized(update):
+            return
+
+        message = update.message
+        document = message.document
+        photo = message.photo[-1] if message.photo else None
+        if document is None and photo is None:
+            return
+
+        filename = (document.file_name if document else "") or "снимок.jpg"
+        mime_type = (document.mime_type if document else "") or "image/jpeg"
+        kind = "image" if photo is not None else kind_of(filename, mime_type)
+
+        if kind == "unsupported":
+            await message.reply_text(
+                f"Не знаю, что делать с файлом {filename!r}.\n\n"
+                "Пришли .docx, .xlsx, .csv, .txt или картинку со скриншотом расписания."
+            )
+            return
+
+        await self._typing(update)
+        try:
+            source = await context.bot.get_file(
+                (document or photo).file_id
+            )
+            data = bytes(await source.download_as_bytearray())
+        except TelegramError as exc:
+            logger.warning("Не удалось скачать файл %r: %s", filename, exc)
+            await message.reply_text("Не смог скачать файл, попробуй ещё раз.")
+            return
+
+        try:
+            if kind == "image":
+                text = await self._image_reader.read(data, mime_type)
+            else:
+                text = await asyncio.to_thread(extract_text, filename, data)
+        except (DocumentError, VisionError) as exc:
+            logger.warning("Файл %r не прочитан: %s", filename, exc)
+            await message.reply_text(f"Не смог прочитать файл: {exc}")
+            return
+
+        logger.info("Файл %r прочитан, %d символов", filename, len(text))
+        await self._propose(update, text)
+
+    async def _propose(self, update: Update, text: str) -> None:
+        """Разбирает текст и показывает список, не записывая ничего сразу.
+
+        Извлечение из файла ошибается чаще, чем разбор короткого сообщения,
+        поэтому здесь всегда спрашиваем подтверждение.
+        """
+        await self._typing(update)
+        try:
+            events = await self._parser.parse(text)
+        except ParseError as exc:
+            logger.warning("Разбор файла не удался: %s", exc)
+            await update.message.reply_text(f"Не смог разобрать расписание: {exc}")
+            return
+
+        if not events:
+            await update.message.reply_text(
+                "В файле не нашлось ни одного дела с датой или временем."
+            )
+            return
+
+        token = uuid.uuid4().hex[:12]
+        self._pending[token] = events
+
+        lines = [f"Нашёл {_plural_found(len(events))}:", ""]
+        for event in events[:PREVIEW_LIMIT]:
+            lines.append(f"• {event.title} — {event.human_range(self._config.timezone)}")
+        if len(events) > PREVIEW_LIMIT:
+            lines.append(f"…и ещё {len(events) - PREVIEW_LIMIT}")
+        lines.append("")
+        lines.append("Записывать в календари?")
+
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("Записать", callback_data=f"save:{token}"),
+                    InlineKeyboardButton("Отмена", callback_data=f"drop:{token}"),
+                ]
+            ]
+        )
+        await update.message.reply_text("\n".join(lines), reply_markup=keyboard)
+
+    async def on_decision(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Нажатие «Записать» или «Отмена» под разобранным файлом."""
+        if not self._authorized(update):
+            return
+
+        query = update.callback_query
+        await query.answer()
+        action, _, token = (query.data or "").partition(":")
+        events = self._pending.pop(token, None)
+
+        if events is None:
+            # Бот перезапускался, либо кнопку нажали второй раз.
+            await query.edit_message_text(
+                f"{query.message.text}\n\n(список устарел — пришли файл заново)"
+            )
+            return
+
+        if action == "drop":
+            await query.edit_message_text(f"{query.message.text}\n\nОтменено.")
+            return
+
+        await query.edit_message_text(f"{query.message.text}\n\nЗаписываю…")
+        reports = []
+        for event in events:
+            results = await self._save(event)
+            reports.append(self._format_event(event, results))
+
+        header = f"{_plural(len(events))}:"
+        await query.message.reply_text(header + "\n\n" + "\n\n".join(reports))
+
     # ─── ежедневный вопрос ──────────────────────────────────────────────────
     async def daily_question(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
@@ -189,6 +320,14 @@ class SchedulerBot:
             await update.message.chat.send_action(ChatAction.TYPING)
         except TelegramError:
             pass  # индикатор набора — мелочь, ради неё ничего не ломаем
+
+
+def _plural_found(count: int) -> str:
+    if count % 10 == 1 and count % 100 != 11:
+        return f"{count} событие"
+    if count % 10 in (2, 3, 4) and count % 100 not in (12, 13, 14):
+        return f"{count} события"
+    return f"{count} событий"
 
 
 def _plural(count: int) -> str:

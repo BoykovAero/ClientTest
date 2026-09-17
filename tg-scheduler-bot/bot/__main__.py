@@ -15,6 +15,7 @@ from telegram.error import InvalidToken
 from telegram.ext import (
     Application,
     ApplicationBuilder,
+    CallbackQueryHandler,
     CommandHandler,
     MessageHandler,
     filters,
@@ -27,6 +28,7 @@ from bot.config import Config, ConfigError, load_config
 from bot.parser import PlanParser
 from bot.telegram_bot import SchedulerBot, on_error
 from bot.transcribe import Transcriber
+from bot.vision import ImageReader
 
 logger = logging.getLogger("bot")
 
@@ -51,9 +53,10 @@ def build_application(config: Config) -> Application:
         api_key=config.openai_api_key, base_url=config.openai_base_url
     )
     logger.info(
-        "Модели: разбор %s, распознавание %s (%s)",
+        "Модели: разбор %s, распознавание %s, зрение %s (%s)",
         config.openai_model,
         config.openai_transcribe_model,
+        config.openai_vision_model,
         config.openai_base_url,
     )
 
@@ -98,6 +101,7 @@ def build_application(config: Config) -> Application:
             default_minutes=config.default_event_minutes,
         ),
         transcriber=Transcriber(openai_client, config.openai_transcribe_model),
+        image_reader=ImageReader(openai_client, config.openai_vision_model),
         google=google,
         icloud=icloud,
     )
@@ -115,6 +119,12 @@ def build_application(config: Config) -> Application:
     )
     application.add_handler(
         MessageHandler(filters.VOICE | filters.AUDIO, scheduler_bot.on_voice)
+    )
+    application.add_handler(
+        MessageHandler(filters.PHOTO | filters.Document.ALL, scheduler_bot.on_document)
+    )
+    application.add_handler(
+        CallbackQueryHandler(scheduler_bot.on_decision, pattern=r"^(save|drop):")
     )
     application.add_error_handler(on_error)
 

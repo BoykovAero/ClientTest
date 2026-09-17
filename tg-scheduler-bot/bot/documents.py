@@ -73,14 +73,33 @@ def extract_text(filename: str, data: bytes) -> str:
     return text
 
 
+# Доля управляющих символов, выше которой считаем, что перед нами не текст.
+MAX_CONTROL_RATIO = 0.05
+
+
+def _looks_like_text(text: str) -> bool:
+    """Отсекает двоичные файлы, притворившиеся текстом.
+
+    cp1251 однобайтовая и «расшифровывает» практически любой мусор, поэтому
+    успешного decode мало: без этой проверки картинка, названная .txt, ушла
+    бы в модель кракозябрами.
+    """
+    if not text:
+        return False
+    control = sum(1 for ch in text if ch < " " and ch not in "\n\r\t")
+    return control / len(text) <= MAX_CONTROL_RATIO
+
+
 def _decode(data: bytes) -> str:
     """Текст в неизвестной кодировке. Windows-1251 всё ещё встречается."""
     for encoding in ("utf-8", "utf-8-sig", "cp1251"):
         try:
-            return data.decode(encoding)
+            text = data.decode(encoding)
         except UnicodeDecodeError:
             continue
-    raise DocumentError("не удалось определить кодировку файла")
+        if _looks_like_text(text):
+            return text
+    raise DocumentError("файл не похож на текст — проверь формат и кодировку")
 
 
 def _from_csv(data: bytes) -> str:
