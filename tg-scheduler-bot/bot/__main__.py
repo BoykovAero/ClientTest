@@ -28,6 +28,7 @@ from bot.config import Config, ConfigError, load_config
 from bot.parser import PlanParser
 from bot.telegram_bot import SchedulerBot, on_error
 from bot.transcribe import Transcriber
+from bot.sheets import SheetsReader
 from bot.vision import ImageReader
 
 logger = logging.getLogger("bot")
@@ -103,6 +104,7 @@ def build_application(config: Config) -> Application:
         transcriber=Transcriber(openai_client, config.openai_transcribe_model),
         image_reader=ImageReader(openai_client, config.openai_vision_model),
         openai_client=openai_client,
+        sheets=SheetsReader(config.google_service_account_info),
         google=google,
         icloud=icloud,
     )

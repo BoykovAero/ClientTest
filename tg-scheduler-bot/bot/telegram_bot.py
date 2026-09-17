@@ -22,6 +22,7 @@ from bot.calendars.base import CalendarEntry, CalendarError, Event, SaveResult
 from bot.documents import DocumentError, extract_text, is_large, kind_of
 from bot.llm import WORKS, WORKS_WITH_VISION, available_models, probe_all
 from bot.parser import ParseError
+from bot.sheets import SheetsError, find_link, strip_link
 from bot.transcribe import TranscriptionError
 from bot.vision import VisionError
 
@@ -36,8 +37,9 @@ START_TEXT = (
     "Я планировщик дня.\n\n"
     "Каждый день в {time} спрошу, как пройдёт день. Ответишь текстом или "
     "голосовым — разберу и запишу события в Google Calendar и в iCloud.\n\n"
-    "Ещё можно прислать файл с расписанием: Word, Excel, таблицу или "
-    "скриншот. Я разберу его и покажу список, прежде чем записывать.\n\n"
+    "Ещё можно прислать файл с расписанием — Word, Excel, таблицу или "
+    "скриншот — либо ссылку на Google Таблицу. Я разберу и покажу список, "
+    "прежде чем записывать.\n\n"
     "Команды:\n"
     "/plan — спросить прямо сейчас\n"
     "/today — что записано на сегодня, с удалением\n"
@@ -54,9 +56,11 @@ PREVIEW_LIMIT = 30
 
 class SchedulerBot:
     def __init__(
-        self, config, parser, transcriber, image_reader, openai_client, google, icloud
+        self, config, parser, transcriber, image_reader, openai_client, google, icloud,
+        sheets=None,
     ) -> None:
         self._config = config
+        self._sheets = sheets
         self._openai_client = openai_client
         self._parser = parser
         self._transcriber = transcriber
@@ -293,7 +297,32 @@ class SchedulerBot:
         text = (update.message.text or "").strip()
         if not text:
             return
+
+        link = find_link(text)
+        if link is not None:
+            await self._from_sheet(update, *link, instruction=strip_link(text))
+            return
+
         await self._process(update, text)
+
+    async def _from_sheet(
+        self, update: Update, sheet_id: str, gid: str, instruction: str
+    ) -> None:
+        """Ссылка на Google Таблицу: читаем её и предлагаем найденное."""
+        await self._typing(update)
+        notice = await update.message.reply_text("Открываю таблицу…")
+
+        try:
+            text = await asyncio.to_thread(self._sheets.read, sheet_id, gid)
+        except SheetsError as exc:
+            logger.warning("Таблица не прочитана: %s", exc)
+            await _drop(notice)
+            await update.message.reply_text(f"Не смог прочитать таблицу: {exc}")
+            return
+
+        logger.info("Таблица прочитана, %d символов", len(text))
+        await _drop(notice)
+        await self._propose(update, text, instruction)
 
     async def on_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
