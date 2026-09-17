@@ -160,7 +160,9 @@ class SchedulerBot:
                 ]
             ]
         )
-        await query.message.reply_text(
+        # Правим то же сообщение, а не шлём новое: иначе чат зарастает
+        # списками и подтверждениями.
+        await query.edit_message_text(
             f"Удалить «{entry.title}» ({entry.when})?\n\n"
             "Событие пропадёт из обоих календарей, вернуть его я не смогу.",
             reply_markup=keyboard,
@@ -172,21 +174,31 @@ class SchedulerBot:
             return
 
         query = update.callback_query
-        await query.answer()
         action, _, rest = (query.data or "").partition(":")
         token, _, number = rest.partition(":")
         entry = self._entry(token, number)
 
         if entry is None:
+            await query.answer()
             await query.edit_message_text("Список устарел — открой /today заново.")
             return
 
         if action == "keep":
-            await query.edit_message_text(f"Оставил «{entry.title}».")
+            await query.answer("Оставил")
+            await _drop(query.message)
             return
 
+        await query.answer()
         await query.edit_message_text(f"Удаляю «{entry.title}»…")
         results = await self._remove(entry)
+
+        if all("✗" not in line for line in results):
+            # Всё получилось — сообщение убираем, итог показываем подсказкой.
+            await query.answer(f"Удалено: {entry.title}", show_alert=False)
+            await _drop(query.message)
+            return
+
+        # Что-то не вышло — такое сообщение должно остаться на виду.
         await query.edit_message_text(
             f"«{entry.title}» ({entry.when})\n" + " · ".join(results)
         )
@@ -432,7 +444,7 @@ class SchedulerBot:
             return
 
         if action == "drop":
-            await query.edit_message_text(f"{query.message.text}\n\nОтменено.")
+            await _drop(query.message)
             return
 
         await query.edit_message_text(f"{query.message.text}\n\nЗаписываю…")
@@ -442,7 +454,8 @@ class SchedulerBot:
             reports.append(self._format_event(event, results))
 
         header = f"{_plural(len(events))}:"
-        await query.message.reply_text(header + "\n\n" + "\n\n".join(reports))
+        await _drop(query.message)
+        await query.message.chat.send_message(header + "\n\n" + "\n\n".join(reports))
 
     # ─── ежедневный вопрос ──────────────────────────────────────────────────
     async def daily_question(self, context: ContextTypes.DEFAULT_TYPE) -> None:

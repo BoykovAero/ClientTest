@@ -18,6 +18,7 @@ from openai import AsyncOpenAI, OpenAIError
 
 from bot.calendars.base import Event
 from bot.llm import describe
+from bot.timelist import parse_time_list
 
 logger = logging.getLogger(__name__)
 
@@ -262,6 +263,13 @@ class PlanParser:
     ) -> list[Event]:
         """Текст -> список событий. Большой текст разбирается частями."""
         moment = now or datetime.now(self._tz)
+
+        # Список дел временем в начале строки разбирается сам: правило жёсткое,
+        # и модель на нём только путает начало с окончанием.
+        direct = parse_time_list(text, moment, self._tz, self._default_minutes)
+        if direct is not None:
+            return direct
+
         chunks = split_into_chunks(text)
         if len(chunks) == 1:
             return await self._parse_chunk(chunks[0], moment, instruction)
