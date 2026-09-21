@@ -61,6 +61,11 @@ class Config:
     def timezone_name(self) -> str:
         return str(self.timezone)
 
+    @property
+    def icloud_enabled(self) -> bool:
+        """Писать ли события ещё и в iCloud."""
+        return bool(self.icloud_apple_id and self.icloud_app_password)
+
 
 def _required(name: str, missing: list[str]) -> str:
     """Обязательная переменная. Пустую считаем незаполненной."""
@@ -178,8 +183,22 @@ def load_config(env_file: Path | None = None) -> Config:
         allowed_user_id = _parse_positive_int("ALLOWED_USER_ID", raw_user_id, 0, problems)
 
     openai_api_key = _required("OPENAI_API_KEY", missing)
-    icloud_apple_id = _required("ICLOUD_APPLE_ID", missing)
-    icloud_app_password = _required("ICLOUD_APP_PASSWORD", missing)
+    # iCloud необязателен. Без него события живут только в Google — это
+    # осознанный выбор для тех, у кого Google-календарь и так подключён ко
+    # всем устройствам: запись в два календаря даёт две копии в одном
+    # приложении. А вот половина доступа — всегда опечатка, а не намерение.
+    icloud_apple_id = os.environ.get("ICLOUD_APPLE_ID", "").strip()
+    icloud_app_password = os.environ.get("ICLOUD_APP_PASSWORD", "").strip()
+    if bool(icloud_apple_id) != bool(icloud_app_password):
+        filled, empty = (
+            ("ICLOUD_APPLE_ID", "ICLOUD_APP_PASSWORD")
+            if icloud_apple_id
+            else ("ICLOUD_APP_PASSWORD", "ICLOUD_APPLE_ID")
+        )
+        problems.append(
+            f"{empty}: заполнена только {filled}. Для записи в iCloud нужны обе, "
+            f"а чтобы выключить iCloud — убери обе"
+        )
 
     # Любой сервис с API, совместимым с OpenAI: сам OpenAI, Groq и прочие.
     # Пустое значение приводится к адресу OpenAI здесь же, чтобы дальше в

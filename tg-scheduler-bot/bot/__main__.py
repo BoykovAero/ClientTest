@@ -110,17 +110,27 @@ def build_application(config: Config) -> Application:
         )
     else:
         logger.info("Google: OAuth-токен -> календарь %s", config.google_calendar_id)
-    icloud = ICloudCalendar(
-        url=config.icloud_caldav_url,
-        apple_id=config.icloud_apple_id,
-        app_password=config.icloud_app_password,
-        calendar_name=config.icloud_calendar_name,
-    )
+    # iCloud подключается, только если заданы доступы. Без него события
+    # пишутся в один Google — так в приложении календаря не появляется
+    # вторая копия каждой записи.
+    icloud = None
+    if config.icloud_enabled:
+        icloud = ICloudCalendar(
+            url=config.icloud_caldav_url,
+            apple_id=config.icloud_apple_id,
+            app_password=config.icloud_app_password,
+            calendar_name=config.icloud_calendar_name,
+        )
+    else:
+        logger.info("iCloud выключен: события пойдут только в Google Calendar")
 
     # Проверяем доступ к календарям сразу, чтобы поломка была видна в логе
     # при старте, а не в 08:45 следующего утра. Падать при этом не нужно:
     # временная недоступность сети не повод не отвечать на /start.
-    for name, calendar in (("Google Calendar", google), ("iCloud", icloud)):
+    targets = [("Google Calendar", google)]
+    if icloud is not None:
+        targets.append(("iCloud", icloud))
+    for name, calendar in targets:
         try:
             calendar.check()
             logger.info("%s: доступ есть", name)

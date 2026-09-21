@@ -225,6 +225,10 @@ class SchedulerBot:
             logger.warning("Не удалось удалить в Google: %s", exc)
             results.append(f"Google ✗ ({exc})")
 
+        if self._icloud is None:
+            # iCloud выключен — пары там и не заводилось.
+            return results
+
         if not entry.uid:
             # Чужое событие: пары в iCloud у него нет.
             results.append("iCloud — пары нет")
@@ -548,18 +552,17 @@ class SchedulerBot:
         await update.message.reply_text(header + "\n\n" + "\n\n".join(reports))
 
     async def _save(self, event: Event) -> list[SaveResult]:
-        """Пишет событие в оба календаря параллельно.
+        """Пишет событие в календари параллельно.
 
-        Клиенты обоих календарей блокирующие, поэтому уходят в потоки.
-        Отказ одного не отменяет запись в другой — частичный успех виден
-        в ответе (контракт A.2.6).
+        Клиенты календарей блокирующие, поэтому уходят в потоки. Отказ
+        одного не отменяет запись в другой — частичный успех виден в
+        ответе (контракт A.2.6). iCloud может быть выключен: тогда
+        остаётся только Google.
         """
-        return list(
-            await asyncio.gather(
-                asyncio.to_thread(self._google.save, event),
-                asyncio.to_thread(self._icloud.save, event),
-            )
-        )
+        writes = [asyncio.to_thread(self._google.save, event)]
+        if self._icloud is not None:
+            writes.append(asyncio.to_thread(self._icloud.save, event))
+        return list(await asyncio.gather(*writes))
 
     def _format_event(self, event: Event, results: list[SaveResult]) -> str:
         when = event.human_range(self._config.timezone)
