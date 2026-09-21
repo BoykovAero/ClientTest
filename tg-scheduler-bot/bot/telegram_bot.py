@@ -15,7 +15,7 @@ from datetime import datetime
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
-from telegram.error import TelegramError
+from telegram.error import Conflict, TelegramError
 from telegram.ext import ContextTypes
 
 from bot.calendars.base import CalendarEntry, CalendarError, Event, SaveResult
@@ -628,6 +628,17 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     Процесс при этом живёт — Restart=always в systemd остаётся страховкой,
     а не штатным способом пережить ошибку (контракт A.2.5).
     """
+    # Conflict прилетает из цикла поллинга на каждый запрос к Telegram, то
+    # есть несколько раз в секунду. Полная трассировка забила бы лог и
+    # спрятала причину, а причина всегда одна из двух и названа в тексте.
+    if isinstance(context.error, Conflict):
+        logger.error(
+            "Telegram не отдаёт апдейты: %s. Причина — либо вебхук на этом "
+            "токене, либо второй запущенный экземпляр бота.",
+            context.error,
+        )
+        return
+
     logger.exception("Необработанная ошибка", exc_info=context.error)
 
     message = getattr(update, "message", None)

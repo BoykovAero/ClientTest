@@ -11,7 +11,7 @@ import sys
 from datetime import time
 
 from openai import AsyncOpenAI
-from telegram.error import InvalidToken
+from telegram.error import InvalidToken, TelegramError
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -48,6 +48,33 @@ def setup_logging(level: str) -> None:
     # держим их на WARNING, чтобы в лог не попали токены.
     for noisy in ("httpx", "httpcore", "telegram", "urllib3", "caldav", "openai"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
+
+
+async def drop_webhook(application: Application) -> None:
+    """Снимает вебхук с токена перед тем, как уйти в поллинг.
+
+    Telegram отдаёт апдейты либо в вебхук, либо через getUpdates, но никогда
+    обоими способами сразу: при активном вебхуке getUpdates отвечает Conflict.
+    Бот при этом остаётся живым процессом и для хостинга выглядит исправным,
+    а на сообщения не отвечает — молча, потому что не видит их. Снимаем
+    вебхук сами, иначе такое состояние чинится только руками.
+    """
+    try:
+        info = await application.bot.get_webhook_info()
+    except TelegramError as exc:
+        logger.warning("Не удалось проверить вебхук: %s", exc)
+        return
+
+    if not info.url:
+        return
+
+    logger.warning("На токене стоит вебхук %s — снимаю, он ломает поллинг", info.url)
+    try:
+        await application.bot.delete_webhook(drop_pending_updates=True)
+    except TelegramError as exc:
+        logger.error("Не удалось снять вебхук: %s", exc)
+        return
+    logger.info("Вебхук снят")
 
 
 def build_application(config: Config) -> Application:
@@ -120,7 +147,12 @@ def build_application(config: Config) -> Application:
     # Ограничитель частоты (AIORateLimiter) намеренно не ставим: он нужен
     # ботам с потоком пользователей, требует отдельного extra и здесь был бы
     # лишней зависимостью — бот обслуживает одного человека.
-    application = ApplicationBuilder().token(config.telegram_bot_token).build()
+    application = (
+        ApplicationBuilder()
+        .token(config.telegram_bot_token)
+        .post_init(drop_webhook)
+        .build()
+    )
 
     application.add_handler(CommandHandler("start", scheduler_bot.start))
     application.add_handler(CommandHandler("plan", scheduler_bot.plan))
