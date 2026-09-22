@@ -11,6 +11,7 @@ import sys
 from datetime import time
 
 from openai import AsyncOpenAI
+from telegram import Update
 from telegram.error import InvalidToken, TelegramError
 from telegram.ext import (
     Application,
@@ -210,7 +211,14 @@ def main() -> int:
     application = build_application(config)
     logger.info("Поллинг Telegram запущен")
     try:
-        application.run_polling(drop_pending_updates=True)
+        # Список типов обновлений задаём явно. Если его не передать, Telegram
+        # берёт тот, что остался от последнего setWebhook на этом токене, —
+        # а он может быть урезанным. Без callback_query бот перестаёт видеть
+        # нажатия на кнопки: сообщения доходят, а «Записать» и «Удалить» не
+        # работают, причём молча.
+        application.run_polling(
+            drop_pending_updates=True, allowed_updates=Update.ALL_TYPES
+        )
     except InvalidToken:
         # Своё сообщение вместо исключения библиотеки: та подставляет в текст
         # сам токен, и он оседает в логах хостинга.

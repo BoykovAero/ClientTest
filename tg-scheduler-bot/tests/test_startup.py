@@ -233,3 +233,32 @@ async def test_otkaz_telegrama_pri_vosstanovlenii_ne_ronyaet_bota():
     bot = FakeBot(fail_info=TelegramError("timed out"))
     error = Conflict("can't use getUpdates method while webhook is active")
     await on_error(FakeUpdate(FakeMessage()), FakeConflictContext(error, bot))
+
+
+# ─── типы обновлений для поллинга ───────────────────────────────────────
+
+
+def test_pollingu_yavno_peredaem_vse_tipy_obnovleniy(monkeypatch, tmp_path):
+    """Без явного списка Telegram берёт остаток от прошлого setWebhook.
+
+    Такой остаток может не включать callback_query, и тогда нажатия на
+    кнопки просто не доходят до бота — молча, без единой ошибки.
+    """
+    from telegram import Update
+
+    import bot.__main__ as main_module
+
+    config = _load(monkeypatch, tmp_path)
+    calls: dict = {}
+
+    class FakeApplication:
+        def run_polling(self, **kwargs) -> None:
+            calls.update(kwargs)
+
+    monkeypatch.setattr(main_module, "load_config", lambda *a, **k: config)
+    monkeypatch.setattr(main_module, "setup_logging", lambda level: None)
+    monkeypatch.setattr(main_module, "build_application", lambda cfg: FakeApplication())
+
+    assert main_module.main() == 0
+    assert Update.CALLBACK_QUERY in calls["allowed_updates"]
+    assert Update.MESSAGE in calls["allowed_updates"]
