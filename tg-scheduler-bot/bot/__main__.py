@@ -61,7 +61,7 @@ async def drop_webhook(application: Application) -> None:
     вебхук сами, иначе такое состояние чинится только руками.
     """
     try:
-        url = await clear_webhook(application.bot, drop_pending=True)
+        url = await clear_webhook(application.bot, drop_pending=False)
     except TelegramError as exc:
         logger.warning("Не удалось проверить вебхук: %s", exc)
         return
@@ -216,8 +216,13 @@ def main() -> int:
         # а он может быть урезанным. Без callback_query бот перестаёт видеть
         # нажатия на кнопки: сообщения доходят, а «Записать» и «Удалить» не
         # работают, причём молча.
+        # Накопленное не выбрасываем. Перезапуск случается при каждом
+        # деплое и при любой возне хостинга с контейнером, и всё, что
+        # человек отправил в эту минуту, пропадало бы молча. Telegram
+        # хранит очередь сутки, так что после долгого простоя бот разберёт
+        # и то, что пришло, пока его не было.
         application.run_polling(
-            drop_pending_updates=True, allowed_updates=Update.ALL_TYPES
+            drop_pending_updates=False, allowed_updates=Update.ALL_TYPES
         )
     except InvalidToken:
         # Своё сообщение вместо исключения библиотеки: та подставляет в текст

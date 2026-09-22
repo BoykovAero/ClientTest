@@ -69,8 +69,8 @@ async def test_webhook_snimaetsya_pered_pollingom():
     bot = FakeBot(url="https://chuzhoy.example/hook")
     await drop_webhook(FakeApplication(bot))
     assert bot.deleted
-    # Накопленные вебхуком апдейты не нужны: они успели устареть.
-    assert bot.dropped_pending is True
+    # Накопленное сохраняем: там сообщения, которые человек уже отправил.
+    assert bot.dropped_pending is False
 
 
 async def test_bez_vebhuka_nichego_ne_trogaem():
@@ -262,3 +262,22 @@ def test_pollingu_yavno_peredaem_vse_tipy_obnovleniy(monkeypatch, tmp_path):
     assert main_module.main() == 0
     assert Update.CALLBACK_QUERY in calls["allowed_updates"]
     assert Update.MESSAGE in calls["allowed_updates"]
+
+
+def test_pri_zapuske_ne_vybrasyvaem_ochered(monkeypatch, tmp_path):
+    """Перезапуск не должен съедать сообщения, отправленные в эту минуту."""
+    import bot.__main__ as main_module
+
+    config = _load(monkeypatch, tmp_path)
+    calls: dict = {}
+
+    class FakeApplication:
+        def run_polling(self, **kwargs) -> None:
+            calls.update(kwargs)
+
+    monkeypatch.setattr(main_module, "load_config", lambda *a, **k: config)
+    monkeypatch.setattr(main_module, "setup_logging", lambda level: None)
+    monkeypatch.setattr(main_module, "build_application", lambda cfg: FakeApplication())
+
+    assert main_module.main() == 0
+    assert calls["drop_pending_updates"] is False
