@@ -26,7 +26,7 @@ from bot.calendars.google import GoogleCalendar
 from bot.calendars.icloud import ICloudCalendar
 from bot.config import Config, ConfigError, load_config
 from bot.parser import PlanParser
-from bot.telegram_bot import SchedulerBot, on_error
+from bot.telegram_bot import SchedulerBot, clear_webhook, on_error
 from bot.transcribe import Transcriber
 from bot.sheets import SheetsReader
 from bot.vision import ImageReader
@@ -60,21 +60,13 @@ async def drop_webhook(application: Application) -> None:
     вебхук сами, иначе такое состояние чинится только руками.
     """
     try:
-        info = await application.bot.get_webhook_info()
+        url = await clear_webhook(application.bot, drop_pending=True)
     except TelegramError as exc:
         logger.warning("Не удалось проверить вебхук: %s", exc)
         return
 
-    if not info.url:
-        return
-
-    logger.warning("На токене стоит вебхук %s — снимаю, он ломает поллинг", info.url)
-    try:
-        await application.bot.delete_webhook(drop_pending_updates=True)
-    except TelegramError as exc:
-        logger.error("Не удалось снять вебхук: %s", exc)
-        return
-    logger.info("Вебхук снят")
+    if url is not None:
+        logger.warning("На токене стоял вебхук %s — снял, он ломает поллинг", url)
 
 
 def build_application(config: Config) -> Application:

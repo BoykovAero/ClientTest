@@ -12,6 +12,7 @@ import asyncio
 import logging
 import uuid
 from datetime import datetime
+from time import monotonic
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction
@@ -45,6 +46,11 @@ START_TEXT = (
     "/today — что записано на сегодня, с удалением\n"
     "/models — какие модели доступны твоему ключу"
 )
+
+# Как часто пытаться снять внезапно появившийся вебхук, секунд.
+CONFLICT_RETRY_SECONDS = 60.0
+# Время последней такой попытки: Conflict сыплется в каждом цикле поллинга.
+_last_conflict_fix = 0.0
 
 # Ключ в user_data, под которым ждут подтверждения разобранные из файла события.
 PENDING_KEY = "pending_events"
@@ -625,6 +631,53 @@ def _plural(count: int) -> str:
     return f"Записал {count} событий"
 
 
+async def clear_webhook(bot, *, drop_pending: bool) -> str | None:
+    """Снимает вебхук с токена, если он там стоит.
+
+    Возвращает адрес снятого вебхука или None, если вебхука не было.
+    Ошибки Telegram пробрасывает: насколько они важны, решает вызывающий.
+    """
+    info = await bot.get_webhook_info()
+    if not info.url:
+        return None
+    await bot.delete_webhook(drop_pending_updates=drop_pending)
+    return info.url
+
+
+async def _recover_from_conflict(bot) -> None:
+    """Пробует вернуть поллинг к жизни после Conflict.
+
+    Вебхук могут поставить на токен уже после старта бота — тогда процесс
+    жив, исходящие сообщения уходят (ежедневный вопрос приходит вовремя),
+    а входящие не видны вовсе. Снимаем вебхук на ходу, не дожидаясь
+    перезапуска. Накопленное не выбрасываем: там лежат сообщения, которые
+    пользователь уже отправил.
+    """
+    global _last_conflict_fix
+
+    now = monotonic()
+    # Conflict повторяется в каждом цикле поллинга, поэтому в Telegram
+    # ходим не чаще раза в минуту.
+    if now - _last_conflict_fix < CONFLICT_RETRY_SECONDS:
+        return
+    _last_conflict_fix = now
+
+    try:
+        url = await clear_webhook(bot, drop_pending=False)
+    except TelegramError as exc:
+        logger.warning("Не удалось проверить вебхук: %s", exc)
+        return
+
+    if url is None:
+        logger.error(
+            "Вебхука на токене нет — значит апдейты забирает второй экземпляр "
+            "бота с тем же токеном. Останови лишний."
+        )
+        return
+
+    logger.warning("Вебхук %s появился после старта — снял, поллинг оживёт", url)
+
+
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Последний рубеж: логируем всё, что не поймали хендлеры.
 
@@ -640,6 +693,7 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
             "токене, либо второй запущенный экземпляр бота.",
             context.error,
         )
+        await _recover_from_conflict(context.bot)
         return
 
     logger.exception("Необработанная ошибка", exc_info=context.error)

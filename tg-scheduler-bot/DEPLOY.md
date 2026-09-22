@@ -691,7 +691,7 @@ UID и сборку iCalendar. Обращений к Telegram, OpenAI и кал�
 | В логе `Permission denied` на `token.json` | Права/владелец сбиты: `sudo chown botuser:botuser /opt/tg-scheduler-bot/token.json` |
 | Бот молчит на `/start` | Неверный `TELEGRAM_BOT_TOKEN`, или пишешь не с того аккаунта (`ALLOWED_USER_ID`), или сервис не запущен |
 | `Conflict: terminated by other getUpdates` | Тот же токен используется где-то ещё (локальная копия на Mac) — останови её |
-| `Conflict: can't use getUpdates method while webhook is active` | На токене висит вебхук: Telegram отдаёт апдейты или в него, или в поллинг, но не в оба. Бот снимает вебхук сам при каждом старте — если строка вернулась, вебхук ставят заново, а значит токен знает кто-то ещё: `/revoke` у @BotFather и новый токен. Посмотреть, чей вебхук: `https://api.telegram.org/bot<ТОКЕН>/getWebhookInfo` |
+| `Conflict: can't use getUpdates method while webhook is active` | На токене висит вебхук: Telegram отдаёт апдейты или в него, или в поллинг, но не в оба. Бот снимает вебхук сам — и при старте, и на ходу, не чаще раза в минуту — если строка вернулась, вебхук ставят заново, а значит токен знает кто-то ещё: `/revoke` у @BotFather и новый токен. Посмотреть, чей вебхук: `https://api.telegram.org/bot<ТОКЕН>/getWebhookInfo` |
 | OpenAI `429 insufficient_quota` | Пустой баланс API — шаг 2 |
 | OpenAI `401` | Ключ неверный или отозван |
 | Google `invalid_grant` | Refresh-токен протух (статус *Testing*, шаг 4.3) или доступ отозван. Перезапусти `google_auth_setup.py` на Mac и скопируй новый `token.json` |

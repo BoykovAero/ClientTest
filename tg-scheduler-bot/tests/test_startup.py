@@ -9,6 +9,7 @@ import pytest
 
 from telegram.error import Conflict, TelegramError
 
+import bot.telegram_bot as telegram_bot
 from bot.__main__ import drop_webhook
 from bot.telegram_bot import on_error
 
@@ -25,8 +26,10 @@ class FakeBot:
         self._fail_delete = fail_delete
         self.deleted = False
         self.dropped_pending = None
+        self.info_calls = 0
 
     async def get_webhook_info(self) -> FakeWebhookInfo:
+        self.info_calls += 1
         if self._fail_info is not None:
             raise self._fail_info
         return FakeWebhookInfo(self._url)
@@ -44,8 +47,9 @@ class FakeApplication:
 
 
 class FakeContext:
-    def __init__(self, error: Exception) -> None:
+    def __init__(self, error: Exception, bot: "FakeBot | None" = None) -> None:
         self.error = error
+        self.bot = bot if bot is not None else FakeBot()
 
 
 class FakeMessage:
@@ -92,9 +96,10 @@ async def test_conflict_pishetsya_odnoy_strokoy_s_prichinoy(caplog):
     with caplog.at_level(logging.ERROR, logger="bot.telegram_bot"):
         await on_error(FakeUpdate(message), FakeContext(error))
 
-    record = caplog.records[-1]
+    record = caplog.records[0]
     assert record.exc_info is None, "трассировка забивает лог: Conflict повторяется в каждом цикле"
     assert "вебхук" in record.getMessage()
+    assert all(other.exc_info is None for other in caplog.records)
     # Ошибка поллинга не относится к конкретному сообщению — отвечать некому.
     assert message.replies == []
 
@@ -175,3 +180,56 @@ async def test_bez_icloud_sobytie_pishetsya_tolko_v_google():
     results = await bot._save(object())
     assert [result.target for result in results] == ["Google Calendar"]
     assert len(google.saved) == 1
+
+
+# ─── вебхук, появившийся уже после старта ───────────────────────────────
+
+
+class FakeConflictContext:
+    def __init__(self, error: Exception, bot: FakeBot) -> None:
+        self.error = error
+        self.bot = bot
+
+
+@pytest.fixture(autouse=True)
+def _sbros_throttle(monkeypatch):
+    """Между тестами забываем, когда снимали вебхук в прошлый раз."""
+    monkeypatch.setattr(telegram_bot, "_last_conflict_fix", 0.0)
+
+
+async def test_conflict_snimaet_vebhuk_na_hodu():
+    bot = FakeBot(url="https://chuzhoy.example/hook")
+    error = Conflict("can't use getUpdates method while webhook is active")
+    await on_error(FakeUpdate(FakeMessage()), FakeConflictContext(error, bot))
+
+    assert bot.deleted
+    # Накопленное не выбрасываем: там сообщения, которые уже отправил человек.
+    assert bot.dropped_pending is False
+
+
+async def test_conflict_bez_vebhuka_nazyvaet_vtoroy_ekzemplyar(caplog):
+    bot = FakeBot(url="")
+    error = Conflict("terminated by other getUpdates request")
+    with caplog.at_level(logging.ERROR, logger="bot.telegram_bot"):
+        await on_error(FakeUpdate(FakeMessage()), FakeConflictContext(error, bot))
+
+    assert not bot.deleted
+    assert "второй экземпляр" in caplog.records[-1].getMessage()
+
+
+async def test_v_telegram_hodim_ne_chashche_raza_v_minutu():
+    bot = FakeBot(url="https://chuzhoy.example/hook")
+    error = Conflict("can't use getUpdates method while webhook is active")
+    context = FakeConflictContext(error, bot)
+
+    # Conflict прилетает в каждом цикле поллинга — несколько раз в секунду.
+    for _ in range(20):
+        await on_error(FakeUpdate(FakeMessage()), context)
+
+    assert bot.info_calls == 1
+
+
+async def test_otkaz_telegrama_pri_vosstanovlenii_ne_ronyaet_bota():
+    bot = FakeBot(fail_info=TelegramError("timed out"))
+    error = Conflict("can't use getUpdates method while webhook is active")
+    await on_error(FakeUpdate(FakeMessage()), FakeConflictContext(error, bot))
