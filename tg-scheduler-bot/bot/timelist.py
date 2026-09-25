@@ -16,10 +16,10 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from bot.calendars.base import Event
+from bot.calendars.base import Event, chain_start
 
 logger = logging.getLogger(__name__)
 
@@ -79,13 +79,9 @@ def parse_time_list(
     previous_end: datetime | None = None
     for start, end, title in parsed:
         if start is None:
-            start = (
-                previous_end
-                if previous_end is not None and previous_end < end
-                else end - timedelta(minutes=default_minutes)
-            )
+            start = chain_start(end, previous_end, default_minutes)
         try:
-            events.append(Event(title=_titled(title), start=start, end=end))
+            events.append(Event(title=title, start=start, end=end))
         except ValueError as exc:
             logger.warning("Список дел: строка %r отбракована: %s", title, exc)
             continue
@@ -97,7 +93,3 @@ def parse_time_list(
     logger.info("Список дел разобран без модели: %d событий", len(events))
     return events
 
-
-def _titled(title: str) -> str:
-    """Первая буква заглавная, остальное как написано."""
-    return title[:1].upper() + title[1:] if title else title

@@ -338,6 +338,30 @@ class TestChainedEnds:
         )
         assert events[0].end <= events[1].start
 
+    def test_blizkiy_konets_zatyagivaet_ves_razryv(self):
+        """«1430-1700 мат», «1830 рус» — русский идёт от 17:00 до 18:30."""
+        events = parse(
+            {
+                "events": [
+                    {"title": "мат", "start": "2026-09-17T14:30:00", "end": "2026-09-17T17:00:00"},
+                    {"title": "рус", "end": "2026-09-17T18:30:00"},
+                ]
+            }
+        )
+        assert events[1].start == datetime(2026, 9, 17, 17, 0, tzinfo=MSK)
+
+    def test_razryv_v_dva_chasa_uzhe_ne_szeplyaetsya(self):
+        """Иначе одно дело растянулось бы на полдня."""
+        events = parse(
+            {
+                "events": [
+                    {"title": "мат", "start": "2026-09-17T14:30:00", "end": "2026-09-17T17:00:00"},
+                    {"title": "рус", "end": "2026-09-17T19:00:00"},
+                ]
+            }
+        )
+        assert events[1].start == datetime(2026, 9, 17, 18, 0, tzinfo=MSK)
+
     def test_first_event_without_start_uses_default_duration(self):
         """Цепляться не от чего — берём длительность по умолчанию назад."""
         events = parse({"events": [{"title": "Сколково", "end": "2026-09-17T18:00:00"}]})
@@ -354,7 +378,9 @@ class TestChainedEnds:
             }
         )
         assert events[1].start < events[1].end
-        assert events[1].start == datetime(2026, 9, 17, 23, 0, tzinfo=MSK)
+        # Разрыв в десять часов — это не продолжение вчерашнего вечера:
+        # берётся обычная длительность.
+        assert events[1].start == datetime(2026, 9, 18, 8, 0, tzinfo=MSK)
 
     def test_explicit_start_is_not_overridden(self):
         """«в 18:00 созвон» — это начало, цепочка не вмешивается."""

@@ -174,9 +174,11 @@ def build_application(config: Config) -> Application:
         CallbackQueryHandler(scheduler_bot.on_decision, pattern=r"^(save|drop):")
     )
     application.add_handler(CallbackQueryHandler(scheduler_bot.on_pick, pattern=r"^pick:"))
-    application.add_handler(
-        CallbackQueryHandler(scheduler_bot.on_delete, pattern=r"^(kill|keep):")
-    )
+    application.add_handler(CallbackQueryHandler(scheduler_bot.on_day, pattern=r"^day:"))
+    application.add_handler(CallbackQueryHandler(scheduler_bot.on_back, pattern=r"^back:"))
+    application.add_handler(CallbackQueryHandler(scheduler_bot.on_move, pattern=r"^move:"))
+    application.add_handler(CallbackQueryHandler(scheduler_bot.on_note, pattern=r"^note:"))
+    application.add_handler(CallbackQueryHandler(scheduler_bot.on_delete, pattern=r"^kill:"))
     application.add_error_handler(on_error)
 
     # Тайм-зона задаётся явно: на сервере системное время в UTC (контракт A.2.3).

@@ -24,6 +24,24 @@ _B32_TO_B32HEX = str.maketrans(
 )
 
 
+# Насколько большой разрыв ещё считается продолжением предыдущего дела.
+# Голое время — это конец: «1430-1700 мат», «1830 рус» значит, что русский
+# идёт от 17:00 до 18:30. Но если от предыдущего конца прошло полдня, дело
+# явно не длилось всё это время — тогда берём обычную длительность.
+MAX_CHAIN_GAP = timedelta(hours=2)
+
+
+def chain_start(end: datetime, previous_end: datetime | None, default_minutes: int) -> datetime:
+    """Начало дела, у которого назван только конец."""
+    if (
+        previous_end is not None
+        and previous_end < end
+        and end - previous_end < MAX_CHAIN_GAP
+    ):
+        return previous_end
+    return end - timedelta(minutes=default_minutes)
+
+
 class CalendarError(RuntimeError):
     """Календарь недоступен или отказал. Ловится на уровне хендлера."""
 
@@ -76,8 +94,13 @@ class Event:
         return f"[{MARKER_PREFIX}:{self.uid}]"
 
     def description(self) -> str:
-        """Описание события: заметки пользователя плюс метка происхождения."""
-        return f"{self.notes.strip()}\n\n{self.marker}".strip()
+        """Описание события — только то, что написал человек.
+
+        Метку происхождения сюда не кладём: она попадалась на глаза в
+        календаре без всякой пользы. Свои события бот узнаёт по id в Google
+        и по UID в iCloud — их не видно.
+        """
+        return self.notes.strip()
 
     def start_date(self) -> date:
         return self.start.date()
@@ -138,12 +161,24 @@ class CalendarEntry:
     ``uid`` заполнен только у событий, созданных ботом: по нему находится
     их пара в iCloud. У чужих событий его нет, и удалить получится лишь
     ту копию, которую видно.
+
+    ``start`` и ``end`` нужны, чтобы событие можно было подвинуть: новое
+    время считается от старого. У события на весь день их нет — такое не
+    двигается по часам.
     """
 
     event_id: str
     when: str
     title: str
     uid: str = ""
+    start: datetime | None = None
+    end: datetime | None = None
+    notes: str = ""
+
+    @property
+    def movable(self) -> bool:
+        """Можно ли назначить событию новое время."""
+        return self.start is not None and self.end is not None
 
     def as_line(self) -> str:
         return f"{self.when}  {self.title}" if self.when else self.title

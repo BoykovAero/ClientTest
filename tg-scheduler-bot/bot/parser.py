@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 
 from openai import AsyncOpenAI, OpenAIError
 
-from bot.calendars.base import Event
+from bot.calendars.base import Event, chain_start
 from bot.llm import describe
 from bot.timelist import parse_time_list
 
@@ -40,7 +40,7 @@ SYSTEM_PROMPT = """\
 {"events": [{"title": "...", "start": "...", "end": "...", "all_day": false, "notes": "..."}]}
 
 Правила:
-- title — короткое название без времени, с заглавной буквы. Например: "Созвон с командой".
+- title — слова пользователя дословно, без времени. Ничего не переписывай, не исправляй и не меняй регистр: «сколково доделать тгбот» так и остаётся «сколково доделать тгбот».
 - start и end — местное время в формате YYYY-MM-DDTHH:MM:SS, без указания зоны.
 - Время, названное с предлогом («в 18:00», «к шести», «в 6 вечера»), — это НАЧАЛО.
 - Голое время в начале строки, без предлога («1800 сколково», «22 физ шк»), — это КОНЕЦ дела. В таком случае start не указывай вообще: начало само подставится от конца предыдущего дела в списке.
@@ -165,10 +165,7 @@ def events_from_payload(
         if start is None:
             # Назван только конец: «1800 сколково» — значит дело идёт
             # от конца предыдущего до 18:00.
-            if previous_end is not None and previous_end < end:
-                start = previous_end
-            else:
-                start = end - timedelta(minutes=default_minutes)
+            start = chain_start(end, previous_end, default_minutes)
 
         if end is None or end < start or (not all_day and end == start):
             end = start if all_day else start + timedelta(minutes=default_minutes)

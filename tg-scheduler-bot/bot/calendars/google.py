@@ -222,9 +222,55 @@ class GoogleCalendar:
                     when=when,
                     title=item.get("summary", "(без названия)"),
                     uid=private.get("tg_scheduler_uid", ""),
+                    # У события на весь день часов нет — по ним его и не двигают.
+                    start=_moment(start),
+                    end=_moment(item.get("end", {})),
+                    notes=(item.get("description") or "").strip(),
                 )
             )
         return entries
+
+    def set_notes(self, event_id: str, notes: str) -> None:
+        """Заменяет описание события."""
+        with self._lock:
+            try:
+                self._get_service().events().patch(
+                    calendarId=self._calendar_id,
+                    eventId=event_id,
+                    body={"description": notes},
+                ).execute()
+                logger.info("Google: у события id=%s обновлено описание", event_id)
+            except HttpError as exc:
+                raise CalendarError(_describe(exc)) from exc
+            except CalendarError:
+                raise
+            except Exception as exc:
+                raise CalendarError(str(exc)) from exc
+
+    def move(self, event_id: str, start: datetime, end: datetime) -> None:
+        """Назначает событию новое время.
+
+        Правим на месте, а не пересоздаём: идентификатор события — это
+        отпечаток исходного текста, и если его сохранить, повторная
+        присылка того же сообщения по-прежнему упрётся в 409 вместо
+        второго события.
+        """
+        body = {
+            "start": {"dateTime": start.isoformat(), "timeZone": self._timezone_name},
+            "end": {"dateTime": end.isoformat(), "timeZone": self._timezone_name},
+        }
+        with self._lock:
+            try:
+                self._get_service().events().patch(
+                    calendarId=self._calendar_id, eventId=event_id, body=body
+                ).execute()
+                logger.info("Google: событие id=%s перенесено на %s", event_id, start)
+            except HttpError as exc:
+                raise CalendarError(_describe(exc)) from exc
+            except CalendarError:
+                raise
+            except Exception as exc:
+                raise CalendarError(str(exc)) from exc
 
     def _to_body(self, event: Event) -> dict:
         body: dict = {
@@ -248,6 +294,24 @@ class GoogleCalendar:
                 "timeZone": self._timezone_name,
             }
         return body
+
+
+def _moment(edge: dict) -> datetime | None:
+    """Время из границы события Google. None — у события на весь день.
+
+    Такое событие занимает сутки целиком, часов у него нет, и двигать его
+    по часам нечего.
+    """
+    raw = edge.get("dateTime")
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        # Формат Google документирован, но ломаться на одном событии из-за
+        # него не стоит: остальной список по-прежнему пригоден.
+        logger.warning("Google: не разобрал время %r", raw)
+        return None
 
 
 def _status(exc: HttpError) -> int:

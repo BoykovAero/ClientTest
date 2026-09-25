@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from time import monotonic
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -24,6 +24,7 @@ from bot.documents import DocumentError, extract_text, is_large, kind_of
 from bot.llm import WORKS, WORKS_WITH_VISION, available_models, probe_all
 from bot.parser import ParseError, split_into_chunks
 from bot.sheets import SheetsError, find_link, looks_like_sheet, strip_link
+from bot.timeedit import TimeEditError, parse_new_time
 from bot.transcribe import TranscriptionError
 from bot.vision import VisionError
 
@@ -43,7 +44,8 @@ START_TEXT = (
     "прежде чем записывать.\n\n"
     "Команды:\n"
     "/plan — спросить прямо сейчас\n"
-    "/today — что записано на сегодня, с удалением\n"
+    "/today — список дел по дням: листается стрелками, а по нажатию на "
+    "номер событие можно перенести, снабдить заметкой или удалить\n"
     "/models — какие модели доступны твоему ключу"
 )
 
@@ -56,6 +58,12 @@ _last_conflict_fix = 0.0
 PENDING_KEY = "pending_events"
 # Сколько событий показать кнопками: у Telegram предел на размер клавиатуры.
 DELETE_LIMIT = 20
+# Сколько показанных списков помнить: по ним работают кнопки под сообщениями.
+LISTING_MEMORY = 50
+# Дни недели для заголовка списка.
+WEEKDAYS = (
+    "Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье",
+)
 # Сколько событий показать в списке: у Telegram предел на длину сообщения.
 PREVIEW_LIMIT = 30
 
@@ -76,8 +84,12 @@ class SchedulerBot:
         # Разобранные из файлов события ждут здесь подтверждения. Память
         # процесса: после перезапуска список просто считается устаревшим.
         self._pending: dict[str, list[Event]] = {}
-        # Показанные списки событий: по номеру из них выбирают, что удалить.
-        self._listings: dict[str, list[CalendarEntry]] = {}
+        # Показанные списки событий: по номеру из них выбирают событие.
+        # Вместе со списком помним день, чтобы перерисовать его после правки.
+        self._listings: dict[str, tuple[int, list[CalendarEntry]]] = {}
+        # У кого что сейчас спрошено: id пользователя -> (что, список, номер,
+        # сообщение с карточкой). Ответ придёт обычным сообщением.
+        self._awaiting: dict[int, tuple[str, str, str, object]] = {}
 
     # ─── авторизация ────────────────────────────────────────────────────────
     def _authorized(self, update: Update) -> bool:
@@ -104,49 +116,104 @@ class SchedulerBot:
         await update.message.reply_text(DAILY_QUESTION)
 
     async def today(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Список дел за день. Дальше по нему можно ходить и править."""
         if not self._authorized(update):
             return
 
-        now = datetime.now(self._config.timezone)
-        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         try:
-            items = await asyncio.to_thread(self._google.list_day, day_start)
+            text, keyboard = await self._day(0)
         except CalendarError as exc:
             logger.warning("Не удалось прочитать календарь: %s", exc)
             await update.message.reply_text(f"Не смог прочитать календарь: {exc}")
             return
 
-        if not items:
-            await update.message.reply_text("На сегодня ничего не записано.")
+        await update.message.reply_text(text, reply_markup=keyboard)
+
+    async def on_day(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Листание по дням — правим то же сообщение, а не шлём новое."""
+        if not self._authorized(update):
             return
 
-        token = uuid.uuid4().hex[:8]
-        self._listings[token] = items[:DELETE_LIMIT]
+        query = update.callback_query
+        await query.answer()
+        _, _, raw = (query.data or "").partition(":")
+        try:
+            offset = int(raw)
+        except ValueError:
+            return
+        await self._redraw(query.message, offset)
 
-        lines = [f"Сегодня, {now:%d.%m}:", ""]
+    def _day_start(self, offset: int) -> datetime:
+        now = datetime.now(self._config.timezone)
+        midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        return midnight + timedelta(days=offset)
+
+    async def _day(self, offset: int) -> tuple[str, InlineKeyboardMarkup]:
+        """Текст и кнопки для одного дня. CalendarError пробрасывается."""
+        day_start = self._day_start(offset)
+        items = await asyncio.to_thread(self._google.list_day, day_start)
+
+        token = self._remember(offset, items[:DELETE_LIMIT])
+        header = f"{_day_name(offset, day_start)}, {day_start:%d.%m}"
+
+        if not items:
+            return f"{header}\n\nНичего не записано.", self._keyboard(token, offset, 0)
+
+        lines = [header, ""]
         lines += [f"{index + 1}. {entry.as_line()}" for index, entry in enumerate(items)]
         if len(items) > DELETE_LIMIT:
             lines.append("")
-            lines.append(f"Удалить можно первые {DELETE_LIMIT}.")
+            lines.append(f"Открыть можно первые {DELETE_LIMIT}.")
         lines.append("")
-        lines.append("Чтобы удалить — нажми на номер.")
+        lines.append("Нажми на номер, чтобы перенести или удалить.")
+        return "\n".join(lines), self._keyboard(token, offset, len(items[:DELETE_LIMIT]))
 
-        await update.message.reply_text(
-            "\n".join(lines), reply_markup=self._number_keyboard(token, len(self._listings[token]))
-        )
+    async def _redraw(self, message, offset: int, note: str = "") -> None:
+        """Перерисовывает день в уже показанном сообщении."""
+        try:
+            text, keyboard = await self._day(offset)
+        except CalendarError as exc:
+            logger.warning("Не удалось прочитать календарь: %s", exc)
+            await message.edit_text(f"Не смог прочитать календарь: {exc}")
+            return
+
+        if note:
+            text = f"{note}\n\n{text}"
+        try:
+            await message.edit_text(text, reply_markup=keyboard)
+        except TelegramError:
+            # Тот же текст с теми же кнопками Telegram править отказывается —
+            # значит на экране и так нужное.
+            pass
+
+    def _remember(self, offset: int, entries: list[CalendarEntry]) -> str:
+        """Запоминает показанный список, чтобы кнопки знали, на что нажали."""
+        token = uuid.uuid4().hex[:8]
+        self._listings[token] = (offset, entries)
+        # Списки живут в памяти процесса; старые незачем держать вечно.
+        while len(self._listings) > LISTING_MEMORY:
+            self._listings.pop(next(iter(self._listings)))
+        return token
 
     @staticmethod
-    def _number_keyboard(token: str, count: int) -> InlineKeyboardMarkup:
-        """Ряды кнопок с номерами событий, по пять в ряд."""
+    def _keyboard(token: str, offset: int, count: int) -> InlineKeyboardMarkup:
+        """Ряд переходов по дням плюс ряды с номерами событий."""
+        rows = [
+            [
+                InlineKeyboardButton("←", callback_data=f"day:{offset - 1}"),
+                InlineKeyboardButton("Сегодня", callback_data="day:0"),
+                InlineKeyboardButton("→", callback_data=f"day:{offset + 1}"),
+            ]
+        ]
         buttons = [
             InlineKeyboardButton(str(number), callback_data=f"pick:{token}:{number}")
             for number in range(1, count + 1)
         ]
-        rows = [buttons[i : i + 5] for i in range(0, len(buttons), 5)]
+        rows += [buttons[i : i + 5] for i in range(0, len(buttons), 5)]
         return InlineKeyboardMarkup(rows)
 
     async def on_pick(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Выбрано событие из списка — спрашиваем подтверждение."""
+        """Выбрано событие — показываем, что с ним можно сделать."""
         if not self._authorized(update):
             return
 
@@ -157,67 +224,264 @@ class SchedulerBot:
         entry = self._entry(token, number)
 
         if entry is None:
-            await query.edit_message_text(
-                f"{query.message.text}\n\n(список устарел — открой /today заново)"
-            )
+            await self._stale(query)
             return
 
-        keyboard = InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton("Удалить", callback_data=f"kill:{token}:{number}"),
-                    InlineKeyboardButton("Отмена", callback_data=f"keep:{token}:{number}"),
-                ]
-            ]
-        )
         # Правим то же сообщение, а не шлём новое: иначе чат зарастает
-        # списками и подтверждениями.
+        # списками и карточками.
         await query.edit_message_text(
-            f"Удалить «{entry.title}» ({entry.when})?\n\n"
-            "Событие пропадёт из обоих календарей, вернуть его я не смогу.",
-            reply_markup=keyboard,
+            self._card_text(entry), reply_markup=self._card_keyboard(entry, token, number)
         )
 
-    async def on_delete(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Подтверждение или отказ от удаления."""
+    @staticmethod
+    def _card_text(entry: CalendarEntry, prompt: str = "") -> str:
+        lines = [f"«{entry.title}»", entry.when]
+        if entry.notes:
+            lines.append("")
+            lines.append(entry.notes)
+        if not entry.movable:
+            lines.append("")
+            lines.append("Событие на весь день — по часам его не подвинуть.")
+        if prompt:
+            lines.append("")
+            lines.append(prompt)
+        return "\n".join(lines)
+
+    @staticmethod
+    def _card_keyboard(
+        entry: CalendarEntry, token: str, number: str
+    ) -> InlineKeyboardMarkup:
+        actions = []
+        if entry.movable:
+            actions.append(
+                InlineKeyboardButton("Перенести", callback_data=f"move:{token}:{number}")
+            )
+        actions.append(
+            InlineKeyboardButton(
+                "Заметка" if not entry.notes else "Заметку", callback_data=f"note:{token}:{number}"
+            )
+        )
+        actions.append(InlineKeyboardButton("Удалить", callback_data=f"kill:{token}:{number}"))
+        return InlineKeyboardMarkup(
+            [actions, [InlineKeyboardButton("← к списку", callback_data=f"back:{token}")]]
+        )
+
+    async def on_back(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Возврат из карточки события к списку дня."""
         if not self._authorized(update):
             return
 
         query = update.callback_query
-        action, _, rest = (query.data or "").partition(":")
+        await query.answer()
+        _, _, token = (query.data or "").partition(":")
+        known = self._listings.get(token)
+        self._awaiting.pop(query.from_user.id, None)
+        await self._redraw(query.message, known[0] if known else 0)
+
+    async def on_move(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Спрашиваем новое время и ждём его следующим сообщением."""
+        if not self._authorized(update):
+            return
+
+        query = update.callback_query
+        await query.answer()
+        _, _, rest = (query.data or "").partition(":")
+        token, _, number = rest.partition(":")
+        entry = self._entry(token, number)
+
+        if entry is None or not entry.movable:
+            await self._stale(query)
+            return
+
+        self._awaiting[query.from_user.id] = ("time", token, number, query.message)
+        await query.edit_message_text(
+            self._card_text(
+                entry,
+                prompt=(
+                    "Пришли новое время:\n"
+                    "• «1500» — сдвину начало, длительность сохраню\n"
+                    "• «1500-1600» — начало и конец\n"
+                    "• «завтра» или «26.09» — другой день, часы прежние\n"
+                    "• «завтра 1500» — и то и другое"
+                ),
+            ),
+            reply_markup=self._waiting_keyboard(token),
+        )
+
+    async def on_note(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Спрашиваем заметку и ждём её следующим сообщением."""
+        if not self._authorized(update):
+            return
+
+        query = update.callback_query
+        await query.answer()
+        _, _, rest = (query.data or "").partition(":")
         token, _, number = rest.partition(":")
         entry = self._entry(token, number)
 
         if entry is None:
-            await query.answer()
-            await query.edit_message_text("Список устарел — открой /today заново.")
+            await self._stale(query)
             return
 
-        if action == "keep":
-            await query.answer("Оставил")
-            await _drop(query.message)
+        self._awaiting[query.from_user.id] = ("note", token, number, query.message)
+        hint = "Пришли заметку — положу её в описание события."
+        if entry.notes:
+            hint += "\nНовая заменит нынешнюю, «-» сотрёт её совсем."
+        await query.edit_message_text(
+            self._card_text(entry, prompt=hint), reply_markup=self._waiting_keyboard(token)
+        )
+
+    @staticmethod
+    def _waiting_keyboard(token: str) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            [[InlineKeyboardButton("← к списку", callback_data=f"back:{token}")]]
+        )
+
+    async def _apply_answer(self, update: Update, text: str) -> bool:
+        """Присланный текст как ответ на вопрос о событии.
+
+        False — если ничего не спрашивали и текст надо разбирать как план.
+        """
+        waiting = self._awaiting.get(update.effective_user.id)
+        if waiting is None:
+            return False
+
+        kind, token, number, card = waiting
+        entry = self._entry(token, number)
+        if entry is None:
+            self._awaiting.pop(update.effective_user.id, None)
+            return False
+
+        if kind == "time":
+            return await self._answer_time(update, text, entry, token, number, card)
+        return await self._answer_note(update, text, entry, token, card)
+
+    async def _answer_time(
+        self, update: Update, text: str, entry: CalendarEntry, token, number, card
+    ) -> bool:
+        if not entry.movable:
+            self._awaiting.pop(update.effective_user.id, None)
+            return False
+
+        today = datetime.now(self._config.timezone).date()
+        try:
+            start, end = parse_new_time(text, entry.start, entry.end, today)
+        except TimeEditError as exc:
+            # Ожидание оставляем: человек просто ошибся в написании.
+            await _drop(update.message)
+            await card.edit_text(
+                self._card_text(entry, prompt=str(exc)),
+                reply_markup=self._waiting_keyboard(token),
+            )
+            return True
+
+        self._awaiting.pop(update.effective_user.id, None)
+        # Сообщение с ответом своё дело сделало — в чате ему не место.
+        await _drop(update.message)
+        results = await self._move(entry, start, end)
+        note = f"«{entry.title}» → {start:%d.%m %H:%M}–{end:%H:%M}\n" + " · ".join(results)
+        await self._redraw(card, self._offset_of(start), note=note)
+        return True
+
+    async def _answer_note(
+        self, update: Update, text: str, entry: CalendarEntry, token, card
+    ) -> bool:
+        self._awaiting.pop(update.effective_user.id, None)
+        await _drop(update.message)
+
+        notes = "" if text.strip() == "-" else text.strip()
+        results = await self._set_notes(entry, notes)
+        known = self._listings.get(token)
+        action = "заметка убрана" if not notes else "заметка записана"
+        note = f"«{entry.title}» — {action}\n" + " · ".join(results)
+        await self._redraw(card, known[0] if known else 0, note=note)
+        return True
+
+    def _offset_of(self, moment: datetime) -> int:
+        """Насколько день события отстоит от сегодняшнего."""
+        return (moment.date() - datetime.now(self._config.timezone).date()).days
+
+    async def _set_notes(self, entry: CalendarEntry, notes: str) -> list[str]:
+        """Пишет заметку в оба календаря, по строке отчёта на каждый."""
+        results = []
+        try:
+            await asyncio.to_thread(self._google.set_notes, entry.event_id, notes)
+            results.append("Google ✓")
+        except CalendarError as exc:
+            logger.warning("Не удалось записать заметку в Google: %s", exc)
+            results.append(f"Google ✗ ({exc})")
+
+        if self._icloud is None or not entry.uid:
+            return results
+
+        try:
+            done = await asyncio.to_thread(self._icloud.set_notes_by_uid, entry.uid, notes)
+            results.append("iCloud ✓" if done else "iCloud — пары нет")
+        except CalendarError as exc:
+            logger.warning("Не удалось записать заметку в iCloud: %s", exc)
+            results.append(f"iCloud ✗ ({exc})")
+        return results
+
+    async def _move(self, entry: CalendarEntry, start, end) -> list[str]:
+        """Переносит событие в обоих календарях, по строке отчёта на каждый."""
+        results = []
+        try:
+            await asyncio.to_thread(self._google.move, entry.event_id, start, end)
+            results.append("Google ✓")
+        except CalendarError as exc:
+            logger.warning("Не удалось перенести в Google: %s", exc)
+            results.append(f"Google ✗ ({exc})")
+
+        if self._icloud is None:
+            return results
+        if not entry.uid:
+            results.append("iCloud — пары нет")
+            return results
+
+        try:
+            moved = await asyncio.to_thread(self._icloud.move_by_uid, entry.uid, start, end)
+            results.append("iCloud ✓" if moved else "iCloud — пары нет")
+        except CalendarError as exc:
+            logger.warning("Не удалось перенести в iCloud: %s", exc)
+            results.append(f"iCloud ✗ ({exc})")
+        return results
+
+    async def _stale(self, query) -> None:
+        """Список из памяти уже вытеснен — показываем свежий вместо ошибки."""
+        await self._redraw(query.message, 0, note="Список устарел, открыл заново.")
+
+    async def on_delete(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Удаление выбранного события."""
+        if not self._authorized(update):
+            return
+
+        query = update.callback_query
+        _, _, rest = (query.data or "").partition(":")
+        token, _, number = rest.partition(":")
+        entry = self._entry(token, number)
+        known = self._listings.get(token)
+        offset = known[0] if known else 0
+
+        if entry is None:
+            await query.answer()
+            await self._stale(query)
             return
 
         await query.answer()
         await query.edit_message_text(f"Удаляю «{entry.title}»…")
         results = await self._remove(entry)
 
-        if all("✗" not in line for line in results):
-            # Всё получилось — сообщение убираем, итог показываем подсказкой.
-            await query.answer(f"Удалено: {entry.title}", show_alert=False)
-            await _drop(query.message)
-            return
-
-        # Что-то не вышло — такое сообщение должно остаться на виду.
-        await query.edit_message_text(
-            f"«{entry.title}» ({entry.when})\n" + " · ".join(results)
+        note = f"Удалено: «{entry.title}»" if all("✗" not in line for line in results) else (
+            f"«{entry.title}» — " + " · ".join(results)
         )
+        await self._redraw(query.message, offset, note=note)
 
     def _entry(self, token: str, number: str) -> CalendarEntry | None:
         """Событие по номеру из списка. None — если список устарел."""
-        entries = self._listings.get(token)
-        if not entries or not number.isdigit():
+        known = self._listings.get(token)
+        if known is None or not number.isdigit():
             return None
+        _, entries = known
         index = int(number) - 1
         return entries[index] if 0 <= index < len(entries) else None
 
@@ -306,6 +570,11 @@ class SchedulerBot:
             return
         text = (update.message.text or "").strip()
         if not text:
+            return
+
+        # Если у события спрошено новое время, это сообщение — ответ на вопрос,
+        # а не новый план.
+        if await self._apply_answer(update, text):
             return
 
         link = find_link(text)
@@ -603,6 +872,17 @@ def _plural_parts(count: int) -> str:
     if count % 10 in (2, 3, 4) and count % 100 not in (12, 13, 14):
         return f"{count} части"
     return f"{count} частей"
+
+
+def _day_name(offset: int, day_start: datetime) -> str:
+    """«Сегодня», «Завтра» или название дня недели."""
+    if offset == 0:
+        return "Сегодня"
+    if offset == 1:
+        return "Завтра"
+    if offset == -1:
+        return "Вчера"
+    return WEEKDAYS[day_start.weekday()]
 
 
 async def _drop(message) -> None:

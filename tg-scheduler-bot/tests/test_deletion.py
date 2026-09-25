@@ -51,7 +51,7 @@ FOREIGN = CalendarEntry(event_id="ev2", when="18:00", title="Чужое", uid=""
 class TestEntryLookup:
     def test_finds_by_number(self):
         bot = make_bot()
-        bot._listings["tok"] = [ENTRY, FOREIGN]
+        bot._listings["tok"] = (0, [ENTRY, FOREIGN])
         assert bot._entry("tok", "2") is FOREIGN
 
     def test_unknown_token_gives_nothing(self):
@@ -60,7 +60,7 @@ class TestEntryLookup:
     @pytest.mark.parametrize("number", ["0", "3", "-1", "абв", ""])
     def test_bad_numbers_are_rejected(self, number):
         bot = make_bot()
-        bot._listings["tok"] = [ENTRY, FOREIGN]
+        bot._listings["tok"] = (0, [ENTRY, FOREIGN])
         assert bot._entry("tok", number) is None
 
 
@@ -104,22 +104,41 @@ class TestRemoval:
 
 
 class TestKeyboard:
+    """Первый ряд — переходы по дням, дальше номера событий."""
+
+    @staticmethod
+    def numbers(markup):
+        return [b for row in markup.inline_keyboard[1:] for b in row]
+
+    def test_pervyy_ryad_vedyot_po_dnyam(self):
+        markup = SchedulerBot._keyboard("tok", 0, 3)
+        nav = markup.inline_keyboard[0]
+        assert [b.callback_data for b in nav] == ["day:-1", "day:0", "day:1"]
+
+    def test_perehody_schitayutsya_ot_pokazannogo_dnya(self):
+        markup = SchedulerBot._keyboard("tok", 3, 0)
+        nav = markup.inline_keyboard[0]
+        assert [b.callback_data for b in nav] == ["day:2", "day:0", "day:4"]
+
     def test_buttons_are_numbered_from_one(self):
-        markup = SchedulerBot._number_keyboard("tok", 3)
-        labels = [b.text for row in markup.inline_keyboard for b in row]
-        assert labels == ["1", "2", "3"]
+        markup = SchedulerBot._keyboard("tok", 0, 3)
+        assert [b.text for b in self.numbers(markup)] == ["1", "2", "3"]
 
     def test_rows_hold_five_buttons(self):
-        markup = SchedulerBot._number_keyboard("tok", 12)
-        assert [len(row) for row in markup.inline_keyboard] == [5, 5, 2]
+        markup = SchedulerBot._keyboard("tok", 0, 12)
+        assert [len(row) for row in markup.inline_keyboard[1:]] == [5, 5, 2]
+
+    def test_pustoy_den_pokazyvaet_tolko_perehody(self):
+        markup = SchedulerBot._keyboard("tok", 0, 0)
+        assert len(markup.inline_keyboard) == 1
 
     def test_callback_carries_token_and_number(self):
-        markup = SchedulerBot._number_keyboard("tok", 1)
-        assert markup.inline_keyboard[0][0].callback_data == "pick:tok:1"
+        markup = SchedulerBot._keyboard("tok", 0, 1)
+        assert self.numbers(markup)[0].callback_data == "pick:tok:1"
 
     def test_callback_data_fits_telegram_limit(self):
         """Telegram отводит под callback_data 64 байта."""
-        markup = SchedulerBot._number_keyboard("a" * 8, DELETE_LIMIT)
+        markup = SchedulerBot._keyboard("a" * 8, 0, DELETE_LIMIT)
         for row in markup.inline_keyboard:
             for button in row:
                 assert len(button.callback_data.encode("utf-8")) <= 64

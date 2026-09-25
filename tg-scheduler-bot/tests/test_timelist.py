@@ -33,13 +33,13 @@ class TestRealMessage:
 
     def test_range_line(self):
         first = parse(self.TEXT)[0]
-        assert first.title == "Установить клод"
+        assert first.title == "установить клод"
         assert (first.start.hour, first.start.minute) == (15, 55)
         assert (first.end.hour, first.end.minute) == (16, 20)
 
     def test_single_time_is_the_end(self):
         second = parse(self.TEXT)[1]
-        assert second.title == "Сколково"
+        assert second.title == "сколково"
         assert (second.start.hour, second.start.minute) == (16, 20)
         assert (second.end.hour, second.end.minute) == (18, 0)
 
@@ -113,8 +113,9 @@ class TestChaining:
         events = parse("10 первое\n1200-1300 второе\n14 третье")
         assert events[2].start == events[1].end
 
-    def test_title_is_capitalised(self):
-        assert parse("1800 сколково\n19 книга")[0].title == "Сколково"
+    def test_title_ostayotsya_doslovnym(self):
+        """Своих слов человек не просил переписывать."""
+        assert parse("1800 сколково\n19 книга")[0].title == "сколково"
 
     def test_inner_capitals_are_kept(self):
-        assert parse("1800 физ шк ФМШ\n19 книга")[0].title == "Физ шк ФМШ"
+        assert parse("1800 физ шк ФМШ\n19 книга")[0].title == "физ шк ФМШ"

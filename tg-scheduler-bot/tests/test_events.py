@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from bot.calendars.base import Event
+from bot.calendars.base import MARKER_PREFIX, Event
 from bot.calendars.icloud import _escape, _fold, build_ics
 
 MSK = ZoneInfo("Europe/Moscow")
@@ -57,11 +57,12 @@ class TestEventUid:
         uid = make_event().uid
         assert re.fullmatch(r"[0-9a-v]{5,1024}", uid), uid
 
-    def test_marker_embedded_in_description(self):
+    def test_v_opisanie_idut_tolko_svoi_slova(self):
+        """Метка происхождения попадалась на глаза в календаре без пользы."""
         event = make_event(notes="в переговорке")
         description = event.description()
-        assert "в переговорке" in description
-        assert event.marker in description
+        assert description == "в переговорке"
+        assert MARKER_PREFIX not in description
 
 
 class TestHumanRange:

@@ -21,6 +21,7 @@ import caldav
 from caldav.lib import error as caldav_error
 
 from bot.calendars.base import MARKER_PREFIX, CalendarError, Event, SaveResult
+from bot.timeedit import TimeEditError, replace_line, retime_ics
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +131,63 @@ class ICloudCalendar:
                 raise CalendarError(f"не смог удалить событие: {exc}") from exc
 
             logger.info("iCloud: удалено событие uid=%s", uid)
+            return True
+
+    def move_by_uid(self, uid: str, start: datetime, end: datetime) -> bool:
+        """Назначает событию новое время. False — если такого события нет.
+
+        Переписываем готовый VEVENT, а не пересобираем его: так у события
+        сохраняются и UID, и описание с меткой, по которым его находит пара
+        в Google.
+        """
+        with self._lock:
+            try:
+                calendar = self._get_calendar()
+                event = calendar.event_by_uid(uid)
+            except caldav_error.NotFoundError:
+                logger.info("iCloud: событие uid=%s не найдено", uid)
+                return False
+            except CalendarError:
+                raise
+            except Exception as exc:
+                raise CalendarError(f"не смог найти событие: {exc}") from exc
+
+            try:
+                event.data = retime_ics(event.data, start, end)
+                event.save()
+            except TimeEditError as exc:
+                raise CalendarError(str(exc)) from exc
+            except Exception as exc:
+                raise CalendarError(f"не смог перенести событие: {exc}") from exc
+
+            logger.info("iCloud: событие uid=%s перенесено на %s", uid, start)
+            return True
+
+    def set_notes_by_uid(self, uid: str, notes: str) -> bool:
+        """Заменяет описание события. False — если такого события нет."""
+        with self._lock:
+            try:
+                calendar = self._get_calendar()
+                event = calendar.event_by_uid(uid)
+            except caldav_error.NotFoundError:
+                logger.info("iCloud: событие uid=%s не найдено", uid)
+                return False
+            except CalendarError:
+                raise
+            except Exception as exc:
+                raise CalendarError(f"не смог найти событие: {exc}") from exc
+
+            try:
+                event.data = replace_line(
+                    event.data, "DESCRIPTION", _escape(notes)
+                )
+                event.save()
+            except TimeEditError as exc:
+                raise CalendarError(str(exc)) from exc
+            except Exception as exc:
+                raise CalendarError(f"не смог обновить описание: {exc}") from exc
+
+            logger.info("iCloud: у события uid=%s обновлено описание", uid)
             return True
 
     @staticmethod
