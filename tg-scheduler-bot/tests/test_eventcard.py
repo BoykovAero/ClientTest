@@ -42,12 +42,12 @@ class FakeGoogle:
         self.noted: list[tuple] = []
         self._fail = fail
 
-    def move(self, event_id, start, end):
+    def move(self, event_id, start, end, calendar_id=""):
         if self._fail:
             raise CalendarError("404: события нет")
         self.moved.append((event_id, start, end))
 
-    def set_notes(self, event_id, notes):
+    def set_notes(self, event_id, notes, calendar_id=""):
         if self._fail:
             raise CalendarError("403: нет доступа")
         self.noted.append((event_id, notes))
@@ -84,6 +84,10 @@ class FakeMessage:
 
     async def delete(self):
         self.deleted = True
+
+
+async def _noop(*args, **kwargs):
+    return None
 
 
 def make_bot(google=None, icloud=None) -> SchedulerBot:
@@ -231,3 +235,55 @@ async def test_oshibka_vo_vremeni_ne_snimaet_ozhidanie():
     assert await bot._apply_answer(make_update(), "когда-нибудь") is True
     assert bot._awaiting != {}
     assert google.moved == []
+
+
+# ─── направление ────────────────────────────────────────────────────────
+
+
+class FakeRouting(FakeGoogle):
+    """Google, знающий про календари направлений."""
+
+    def __init__(self, fail: bool = False) -> None:
+        super().__init__(fail)
+        self.relocated: list[tuple] = []
+
+    def move_to_category(self, event_id, source, category):
+        if self._fail:
+            raise CalendarError("403: нет доступа")
+        self.relocated.append((event_id, source, category))
+        return f"cal-{category}"
+
+
+def test_v_kartochke_est_knopka_napravleniya():
+    data = [b.callback_data for row in SchedulerBot._card_keyboard(TIMED, "tok", "1").inline_keyboard for b in row]
+    assert "cat:tok:1" in data
+
+
+def test_kartochka_nazyvaet_nyneshnee_napravlenie():
+    entry = CalendarEntry(
+        event_id="ev1", when="19:00", title="сколково", start=moment(19), end=moment(19, 30),
+        category="Работа",
+    )
+    assert "Работа" in SchedulerBot._card_text(entry)
+
+
+async def test_smena_napravleniya_perenosit_sobytie():
+    google = FakeRouting()
+    bot = make_bot(google)
+    entry = CalendarEntry(
+        event_id="ev1", when="19:00", title="сколково", start=moment(19), end=moment(19, 30),
+        calendar_id="cal-main",
+    )
+    bot._listings["tok"] = (0, [entry])
+
+    query = SimpleNamespace(
+        data="setcat:tok:1:1",
+        message=FakeMessage(),
+        from_user=SimpleNamespace(id=1),
+        answer=_noop,
+        edit_message_text=_noop,
+    )
+    await bot.on_set_category(
+        SimpleNamespace(callback_query=query, effective_user=SimpleNamespace(id=1)), None
+    )
+    assert google.relocated == [("ev1", "cal-main", "Работа")]

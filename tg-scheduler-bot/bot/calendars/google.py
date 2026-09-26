@@ -53,6 +53,9 @@ class GoogleCalendar:
         self._service_account_info = service_account_info
         self._calendar_id = calendar_id
         self._timezone_name = timezone_name
+        # Направление -> идентификатор его календаря. Заполняется при старте
+        # через ensure_calendars; пока пусто, всё идёт в основной календарь.
+        self._category_calendars: dict[str, str] = {}
         self._lock = threading.Lock()
         self._credentials_cache = None
         self._service = None
@@ -145,13 +148,95 @@ class GoogleCalendar:
             except Exception as exc:  # сеть, TLS, что угодно
                 raise CalendarError(str(exc)) from exc
 
+    def calendar_for(self, category: str) -> str:
+        """Календарь направления. Основной — если направления нет."""
+        return self._category_calendars.get(category, self._calendar_id)
+
+    @property
+    def category_calendars(self) -> dict[str, str]:
+        return dict(self._category_calendars)
+
+    def ensure_calendars(self, categories, share_with: str) -> dict[str, str]:
+        """Заводит по календарю на направление и отдаёт их пользователю.
+
+        Календари принадлежат сервисному аккаунту, поэтому создать их он
+        может сам — руками в браузере ничего делать не нужно. Уже
+        существующие не трогаем: ищем по названию среди своих.
+
+        Цвет у каждого человек выбирает сам в своём приложении: в Google
+        цвет календаря — настройка того, кто на него смотрит, и выставить
+        её за него нельзя.
+        """
+        with self._lock:
+            service = self._get_service()
+            try:
+                existing = {
+                    item.get("summary", ""): item.get("id", "")
+                    for item in service.calendarList()
+                    .list(showHidden=True)
+                    .execute()
+                    .get("items", [])
+                }
+            except HttpError as exc:
+                raise CalendarError(_describe(exc)) from exc
+            except Exception as exc:  # сеть, TLS, что угодно
+                raise CalendarError(str(exc)) from exc
+
+            found: dict[str, str] = {}
+            for category in categories:
+                calendar_id = existing.get(category)
+                if calendar_id:
+                    found[category] = calendar_id
+                    continue
+                try:
+                    created = (
+                        service.calendars()
+                        .insert(
+                            body={
+                                "summary": category,
+                                "timeZone": self._timezone_name,
+                            }
+                        )
+                        .execute()
+                    )
+                except HttpError as exc:
+                    raise CalendarError(_describe(exc)) from exc
+                except Exception as exc:  # сеть, TLS, что угодно
+                    raise CalendarError(str(exc)) from exc
+
+                calendar_id = created.get("id", "")
+                found[category] = calendar_id
+                logger.info("Google: создан календарь %r (%s)", category, calendar_id)
+                self._share(service, calendar_id, share_with)
+
+            self._category_calendars = found
+            return dict(found)
+
+    @staticmethod
+    def _share(service, calendar_id: str, share_with: str) -> None:
+        """Отдаёт календарь человеку. Без этого он его просто не увидит."""
+        if not share_with:
+            logger.warning("Google: некому отдать календарь %s", calendar_id)
+            return
+        try:
+            service.acl().insert(
+                calendarId=calendar_id,
+                body={"role": "writer", "scope": {"type": "user", "value": share_with}},
+            ).execute()
+            logger.info("Google: календарь %s отдан %s", calendar_id, share_with)
+        except Exception as exc:
+            # Календарь уже создан; без доступа он бесполезен, но ронять
+            # из-за этого запуск незачем — скажем в лог.
+            logger.error("Google: не смог отдать календарь %s: %s", calendar_id, exc)
+
     def save(self, event: Event) -> SaveResult:
         """Создаёт событие. Повторный вызов с тем же событием не плодит дубль."""
         with self._lock:
             try:
                 service = self._get_service()
                 service.events().insert(
-                    calendarId=self._calendar_id, body=self._to_body(event)
+                    calendarId=self.calendar_for(event.category),
+                    body=self._to_body(event),
                 ).execute()
                 logger.info("Google: создано событие %r (id=%s)", event.title, event.uid)
                 return SaveResult.created(TARGET)
@@ -169,12 +254,12 @@ class GoogleCalendar:
                 logger.exception("Google: непредвиденная ошибка на %r", event.title)
                 return SaveResult.failed(TARGET, str(exc))
 
-    def delete(self, event_id: str) -> None:
+    def delete(self, event_id: str, calendar_id: str = "") -> None:
         """Удаляет событие по идентификатору. Уже удалённое считается успехом."""
         with self._lock:
             try:
                 self._get_service().events().delete(
-                    calendarId=self._calendar_id, eventId=event_id
+                    calendarId=calendar_id or self._calendar_id, eventId=event_id
                 ).execute()
                 logger.info("Google: удалено событие id=%s", event_id)
             except HttpError as exc:
@@ -189,14 +274,36 @@ class GoogleCalendar:
                 raise CalendarError(str(exc)) from exc
 
     def list_day(self, day_start: datetime) -> list[CalendarEntry]:
-        """События за сутки от day_start."""
+        """События за сутки от day_start — из всех календарей сразу.
+
+        Основной читается наравне с календарями направлений, поэтому в
+        списке видно и то, что человек завёл сам, мимо бота.
+        """
+        sources = [(self._calendar_id, "")]
+        sources += [
+            (calendar_id, category)
+            for category, calendar_id in self._category_calendars.items()
+            if calendar_id != self._calendar_id
+        ]
+
+        entries: list[CalendarEntry] = []
+        for calendar_id, category in sources:
+            entries += self._list_one(calendar_id, category, day_start)
+        # События на весь день идут первыми: у них нет часов, и сравнивать
+        # их с остальными напрямую нельзя.
+        entries.sort(key=lambda entry: (entry.start is not None, entry.start or day_start))
+        return entries
+
+    def _list_one(
+        self, calendar_id: str, category: str, day_start: datetime
+    ) -> list[CalendarEntry]:
         with self._lock:
             try:
                 response = (
                     self._get_service()
                     .events()
                     .list(
-                        calendarId=self._calendar_id,
+                        calendarId=calendar_id,
                         timeMin=day_start.isoformat(),
                         timeMax=(day_start + timedelta(days=1)).isoformat(),
                         singleEvents=True,
@@ -226,16 +333,18 @@ class GoogleCalendar:
                     start=_moment(start),
                     end=_moment(item.get("end", {})),
                     notes=(item.get("description") or "").strip(),
+                    calendar_id=calendar_id,
+                    category=category,
                 )
             )
         return entries
 
-    def set_notes(self, event_id: str, notes: str) -> None:
+    def set_notes(self, event_id: str, notes: str, calendar_id: str = "") -> None:
         """Заменяет описание события."""
         with self._lock:
             try:
                 self._get_service().events().patch(
-                    calendarId=self._calendar_id,
+                    calendarId=calendar_id or self._calendar_id,
                     eventId=event_id,
                     body={"description": notes},
                 ).execute()
@@ -247,7 +356,30 @@ class GoogleCalendar:
             except Exception as exc:
                 raise CalendarError(str(exc)) from exc
 
-    def move(self, event_id: str, start: datetime, end: datetime) -> None:
+    def move_to_category(self, event_id: str, source: str, category: str) -> str:
+        """Переносит событие в календарь направления, сохраняя его id.
+
+        Google умеет это одним запросом, так что событие не пересоздаётся:
+        ни идентификатор, ни описание, ни напоминания не теряются.
+        """
+        destination = self.calendar_for(category)
+        if destination == (source or self._calendar_id):
+            return destination
+        with self._lock:
+            try:
+                self._get_service().events().move(
+                    calendarId=source or self._calendar_id,
+                    eventId=event_id,
+                    destination=destination,
+                ).execute()
+                logger.info("Google: событие id=%s переехало в %r", event_id, category)
+            except HttpError as exc:
+                raise CalendarError(_describe(exc)) from exc
+            except Exception as exc:
+                raise CalendarError(str(exc)) from exc
+        return destination
+
+    def move(self, event_id: str, start: datetime, end: datetime, calendar_id: str = "") -> None:
         """Назначает событию новое время.
 
         Правим на месте, а не пересоздаём: идентификатор события — это
@@ -262,7 +394,9 @@ class GoogleCalendar:
         with self._lock:
             try:
                 self._get_service().events().patch(
-                    calendarId=self._calendar_id, eventId=event_id, body=body
+                    calendarId=calendar_id or self._calendar_id,
+                    eventId=event_id,
+                    body=body,
                 ).execute()
                 logger.info("Google: событие id=%s перенесено на %s", event_id, start)
             except HttpError as exc:

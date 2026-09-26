@@ -60,6 +60,9 @@ class Event:
     end: datetime
     all_day: bool = False
     notes: str = ""
+    # Учёба, Работа, Развитие или Личное. Пусто — не опознано; такое событие
+    # идёт в основной календарь без цвета.
+    category: str = ""
 
     def __post_init__(self) -> None:
         if not self.title.strip():
@@ -174,6 +177,9 @@ class CalendarEntry:
     start: datetime | None = None
     end: datetime | None = None
     notes: str = ""
+    # Из какого календаря запись: правки адресуются туда же.
+    calendar_id: str = ""
+    category: str = ""
 
     @property
     def movable(self) -> bool:

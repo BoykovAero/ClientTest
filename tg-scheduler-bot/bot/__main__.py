@@ -25,6 +25,7 @@ from telegram.ext import (
 from bot.calendars.base import CalendarError
 from bot.calendars.google import GoogleCalendar
 from bot.calendars.icloud import ICloudCalendar
+from bot.categories import CATEGORIES
 from bot.config import Config, ConfigError, load_config
 from bot.parser import PlanParser
 from bot.telegram_bot import SchedulerBot, clear_webhook, on_error
@@ -120,6 +121,15 @@ def build_application(config: Config) -> Application:
     # Проверяем доступ к календарям сразу, чтобы поломка была видна в логе
     # при старте, а не в 08:45 следующего утра. Падать при этом не нужно:
     # временная недоступность сети не повод не отвечать на /start.
+    # Календари направлений заводит сам бот: они принадлежат сервисному
+    # аккаунту, так что создать их он может без чужой помощи, а человеку
+    # остаётся выбрать им цвета в своём приложении.
+    try:
+        made = google.ensure_calendars(CATEGORIES, share_with=config.google_calendar_id)
+        logger.info("Календари направлений: %s", ", ".join(sorted(made)))
+    except CalendarError as exc:
+        logger.error("Не удалось завести календари направлений: %s", exc)
+
     targets = [("Google Calendar", google)]
     if icloud is not None:
         targets.append(("iCloud", icloud))
@@ -178,6 +188,10 @@ def build_application(config: Config) -> Application:
     application.add_handler(CallbackQueryHandler(scheduler_bot.on_back, pattern=r"^back:"))
     application.add_handler(CallbackQueryHandler(scheduler_bot.on_move, pattern=r"^move:"))
     application.add_handler(CallbackQueryHandler(scheduler_bot.on_note, pattern=r"^note:"))
+    application.add_handler(CallbackQueryHandler(scheduler_bot.on_category, pattern=r"^cat:"))
+    application.add_handler(
+        CallbackQueryHandler(scheduler_bot.on_set_category, pattern=r"^setcat:")
+    )
     application.add_handler(CallbackQueryHandler(scheduler_bot.on_delete, pattern=r"^kill:"))
     application.add_error_handler(on_error)
 

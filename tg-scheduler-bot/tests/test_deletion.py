@@ -13,7 +13,7 @@ class FakeGoogle:
         self.deleted: list[str] = []
         self._fail = fail
 
-    def delete(self, event_id: str) -> None:
+    def delete(self, event_id: str, calendar_id: str = "") -> None:
         if self._fail:
             raise CalendarError("404: календарь не найден")
         self.deleted.append(event_id)

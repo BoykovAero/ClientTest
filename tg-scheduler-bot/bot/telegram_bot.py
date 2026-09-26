@@ -20,6 +20,7 @@ from telegram.error import Conflict, TelegramError
 from telegram.ext import ContextTypes
 
 from bot.calendars.base import CalendarEntry, CalendarError, Event, SaveResult
+from bot.categories import CATEGORIES
 from bot.documents import DocumentError, extract_text, is_large, kind_of
 from bot.llm import WORKS, WORKS_WITH_VISION, available_models, probe_all
 from bot.parser import ParseError, split_into_chunks
@@ -236,6 +237,8 @@ class SchedulerBot:
     @staticmethod
     def _card_text(entry: CalendarEntry, prompt: str = "") -> str:
         lines = [f"«{entry.title}»", entry.when]
+        if entry.category:
+            lines[-1] = f"{entry.when} · {entry.category}"
         if entry.notes:
             lines.append("")
             lines.append(entry.notes)
@@ -263,8 +266,71 @@ class SchedulerBot:
         )
         actions.append(InlineKeyboardButton("Удалить", callback_data=f"kill:{token}:{number}"))
         return InlineKeyboardMarkup(
-            [actions, [InlineKeyboardButton("← к списку", callback_data=f"back:{token}")]]
+            [
+                actions,
+                [InlineKeyboardButton("Направление", callback_data=f"cat:{token}:{number}")],
+                [InlineKeyboardButton("← к списку", callback_data=f"back:{token}")],
+            ]
         )
+
+    async def on_category(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Показывает направления на выбор."""
+        if not self._authorized(update):
+            return
+
+        query = update.callback_query
+        await query.answer()
+        _, _, rest = (query.data or "").partition(":")
+        token, _, number = rest.partition(":")
+        entry = self._entry(token, number)
+
+        if entry is None:
+            await self._stale(query)
+            return
+
+        buttons = [
+            InlineKeyboardButton(
+                f"• {name}" if name == entry.category else name,
+                callback_data=f"setcat:{token}:{number}:{index}",
+            )
+            for index, name in enumerate(CATEGORIES)
+        ]
+        rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
+        rows.append([InlineKeyboardButton("← к списку", callback_data=f"back:{token}")])
+        await query.edit_message_text(
+            self._card_text(entry, prompt="Куда отнести это дело?"),
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+
+    async def on_set_category(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Переносит событие в календарь выбранного направления."""
+        if not self._authorized(update):
+            return
+
+        query = update.callback_query
+        await query.answer()
+        _, _, rest = (query.data or "").partition(":")
+        token, number, index = (rest.split(":") + ["", ""])[:3]
+        entry = self._entry(token, number)
+
+        if entry is None or not index.isdigit() or int(index) >= len(CATEGORIES):
+            await self._stale(query)
+            return
+
+        category = CATEGORIES[int(index)]
+        known = self._listings.get(token)
+        offset = known[0] if known else 0
+
+        try:
+            await asyncio.to_thread(
+                self._google.move_to_category, entry.event_id, entry.calendar_id, category
+            )
+            note = f"«{entry.title}» → {category}"
+        except CalendarError as exc:
+            logger.warning("Не удалось сменить направление: %s", exc)
+            note = f"«{entry.title}» — не смог перенести: {exc}"
+
+        await self._redraw(query.message, offset, note=note)
 
     async def on_back(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Возврат из карточки события к списку дня."""
@@ -405,7 +471,9 @@ class SchedulerBot:
         """Пишет заметку в оба календаря, по строке отчёта на каждый."""
         results = []
         try:
-            await asyncio.to_thread(self._google.set_notes, entry.event_id, notes)
+            await asyncio.to_thread(
+                self._google.set_notes, entry.event_id, notes, entry.calendar_id
+            )
             results.append("Google ✓")
         except CalendarError as exc:
             logger.warning("Не удалось записать заметку в Google: %s", exc)
@@ -426,7 +494,9 @@ class SchedulerBot:
         """Переносит событие в обоих календарях, по строке отчёта на каждый."""
         results = []
         try:
-            await asyncio.to_thread(self._google.move, entry.event_id, start, end)
+            await asyncio.to_thread(
+                self._google.move, entry.event_id, start, end, entry.calendar_id
+            )
             results.append("Google ✓")
         except CalendarError as exc:
             logger.warning("Не удалось перенести в Google: %s", exc)
@@ -489,7 +559,7 @@ class SchedulerBot:
         """Удаляет событие из обоих календарей, по строке отчёта на каждый."""
         results = []
         try:
-            await asyncio.to_thread(self._google.delete, entry.event_id)
+            await asyncio.to_thread(self._google.delete, entry.event_id, entry.calendar_id)
             results.append("Google ✓")
         except CalendarError as exc:
             logger.warning("Не удалось удалить в Google: %s", exc)

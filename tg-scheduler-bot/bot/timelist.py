@@ -20,6 +20,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from bot.calendars.base import Event, chain_start
+from bot.categories import detect
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +82,9 @@ def parse_time_list(
         if start is None:
             start = chain_start(end, previous_end, default_minutes)
         try:
-            events.append(Event(title=title, start=start, end=end))
+            events.append(
+                Event(title=title, start=start, end=end, category=detect(title))
+            )
         except ValueError as exc:
             logger.warning("Список дел: строка %r отбракована: %s", title, exc)
             continue

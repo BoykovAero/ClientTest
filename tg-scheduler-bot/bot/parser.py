@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 from openai import AsyncOpenAI, OpenAIError
 
 from bot.calendars.base import Event, chain_start
+from bot.categories import detect, normalise
 from bot.llm import describe
 from bot.timelist import parse_time_list
 
@@ -37,10 +38,11 @@ SYSTEM_PROMPT = """\
 в список событий календаря.
 
 Верни СТРОГО JSON-объект вида:
-{"events": [{"title": "...", "start": "...", "end": "...", "all_day": false, "notes": "..."}]}
+{"events": [{"title": "...", "start": "...", "end": "...", "all_day": false, "notes": "...", "category": "..."}]}
 
 Правила:
 - title — слова пользователя дословно, без времени. Ничего не переписывай, не исправляй и не меняй регистр: «сколково доделать тгбот» так и остаётся «сколково доделать тгбот».
+- category — одно из: Учёба, Работа, Развитие, Личное. Учёба — школа, предметы, экзамены. Работа — проекты и Сколково. Развитие — книги, курсы, настройка инструментов. Личное — встречи, олимпиады, латинский, быт. Не уверен — оставь пустым.
 - start и end — местное время в формате YYYY-MM-DDTHH:MM:SS, без указания зоны.
 - Время, названное с предлогом («в 18:00», «к шести», «в 6 вечера»), — это НАЧАЛО.
 - Голое время в начале строки, без предлога («1800 сколково», «22 физ шк»), — это КОНЕЦ дела. В таком случае start не указывай вообще: начало само подставится от конца предыдущего дела в списке.
@@ -173,6 +175,11 @@ def events_from_payload(
         if not all_day:
             previous_end = end
 
+        notes = str(item.get("notes") or "").strip()
+        # Слова решают первыми: правило жёсткое и не плавает от запуска к
+        # запуску. Догадка модели идёт в ход, только если не совпало ничего.
+        category = detect(f"{title} {notes}") or normalise(item.get("category", ""))
+
         try:
             events.append(
                 Event(
@@ -180,7 +187,8 @@ def events_from_payload(
                     start=start,
                     end=end,
                     all_day=all_day,
-                    notes=str(item.get("notes") or "").strip(),
+                    notes=notes,
+                    category=category,
                 )
             )
         except ValueError as exc:
