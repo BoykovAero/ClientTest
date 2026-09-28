@@ -866,6 +866,9 @@ class SchedulerBot:
         Извлечение из файла ошибается чаще, чем разбор короткого сообщения,
         поэтому здесь всегда спрашиваем подтверждение.
         """
+        # Столбец выбирают кнопкой, а у нажатия кнопки нет update.message:
+        # отвечаем в чат, а не ответом на исходное сообщение.
+        chat = update.effective_chat
         await self._typing(update)
 
         notice = None
@@ -873,7 +876,7 @@ class SchedulerBot:
         if is_large(text):
             parts = len(split_into_chunks(text))
             about = f" (столбец «{column}»)" if column else ""
-            notice = await update.message.reply_text(
+            notice = await chat.send_message(
                 f"Расписание большое{about}: разбираю {_plural_parts(parts)}…"
             )
             progress = _progress_reporter(notice, column)
@@ -885,7 +888,7 @@ class SchedulerBot:
         except ParseError as exc:
             logger.warning("Разбор файла не удался: %s", exc)
             await _drop(notice)
-            await update.message.reply_text(f"Не смог разобрать расписание: {exc}")
+            await chat.send_message(f"Не смог разобрать расписание: {exc}")
             return
 
         if not events:
@@ -895,7 +898,7 @@ class SchedulerBot:
                 else ""
             )
             await _drop(notice)
-            await update.message.reply_text(
+            await chat.send_message(
                 f"В файле не нашлось подходящих дел с датой или временем.{hint}"
             )
             return
@@ -920,7 +923,7 @@ class SchedulerBot:
             ]
         )
         await _drop(notice)
-        await update.message.reply_text("\n".join(lines), reply_markup=keyboard)
+        await chat.send_message("\n".join(lines), reply_markup=keyboard)
 
     async def on_decision(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Нажатие «Записать» или «Отмена» под разобранным файлом."""
@@ -1009,8 +1012,11 @@ class SchedulerBot:
 
     @staticmethod
     async def _typing(update: Update) -> None:
+        chat = update.effective_chat
+        if chat is None:
+            return
         try:
-            await update.message.chat.send_action(ChatAction.TYPING)
+            await chat.send_action(ChatAction.TYPING)
         except TelegramError:
             pass  # индикатор набора — мелочь, ради неё ничего не ломаем
 
