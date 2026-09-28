@@ -18,7 +18,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from bot.grid import fill_merges, find_column, narrow, to_text
+from bot.grid import fill_merges, narrow_or_ask, to_text
 
 logger = logging.getLogger(__name__)
 
@@ -155,14 +155,12 @@ class SheetsReader:
         ]
         grid = fill_merges(rows, merges)
 
-        found = find_column(grid, instruction) if instruction else None
-        if found is not None:
-            column, name = found
+        text, name = narrow_or_ask(grid, instruction)
+        if name:
             logger.info("Таблица: лист %r, столбец %r", title, name)
-            return narrow(grid, column), name
-
-        logger.info("Таблица: лист %r, %d строк целиком", title, len(rows))
-        return to_text(grid), ""
+        else:
+            logger.info("Таблица: лист %r, %d строк целиком", title, len(rows))
+        return text, name
 
     # ─── выгрузка в CSV, для таблиц, открытых по ссылке ─────────────────────
     def _read_public(self, sheet_id: str, gid: str, instruction: str = "") -> tuple[str, str]:
@@ -191,17 +189,11 @@ class SheetsReader:
         # У выгрузки нет сведений об объединениях, но позиции ячеек в ней
         # сохранены — этого хватает, чтобы выбрать нужный столбец.
         rows = [[_clean(cell) for cell in row] for row in csv.reader(io.StringIO(decoded))]
-        found = find_column(rows, instruction) if instruction else None
-        if found is not None:
-            column, name = found
-            logger.info("Таблица из выгрузки: столбец %r", name)
-            return narrow(rows, column), name
-
-        text = to_text(rows)
+        text, name = narrow_or_ask(rows, instruction)
         if not text:
             raise SheetsError("таблица пуста")
-        logger.info("Таблица прочитана выгрузкой в CSV")
-        return text, ""
+        logger.info("Таблица из выгрузки: столбец %r", name or "весь лист")
+        return text, name
 
 
 def _describe(exc: HttpError) -> str:

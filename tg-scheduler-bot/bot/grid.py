@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +93,108 @@ def find_column(rows: list[list[str]], instruction: str) -> tuple[int, str] | No
             )
         return None
     return matches[0]
+
+
+class ColumnChoiceNeeded(Exception):
+    """В таблице несколько столбцов, и какой нужен — непонятно.
+
+    Вываливать в модель всю таблицу в таком случае нельзя: она слепит
+    события из заголовков и соседних колонок. Лучше спросить.
+    """
+
+    def __init__(self, choices: list[str], matched: bool = False) -> None:
+        super().__init__("нужно выбрать столбец")
+        self.choices = choices
+        # True — варианты подобраны по просьбе, False — это просто все
+        # столбцы листа. Первые куда полезнее показывать.
+        self.matched = matched
+
+
+def list_columns(rows: list[list[str]]) -> list[tuple[int, str]]:
+    """Столбцы, которые можно предложить на выбор."""
+    header_index = find_header(rows)
+    if header_index < 0:
+        return []
+
+    seen: set[str] = set()
+    columns = []
+    for column, cell in enumerate(rows[header_index]):
+        name = cell.strip()
+        if column == 0 or len(normalise(name)) < MIN_NAME_LENGTH:
+            continue
+        # Объединённые заголовки повторяются в каждой своей колонке —
+        # предлагать один и тот же класс дважды незачем.
+        if normalise(name) in seen:
+            continue
+        seen.add(normalise(name))
+        columns.append((column, name))
+    return columns
+
+
+def _tokens(instruction: str) -> list[str]:
+    """Слова просьбы, по которым имеет смысл искать столбец.
+
+    Если среди них есть слова с цифрами, берём только их: в расписании
+    класс называется «11е», и это куда более точная примета, чем «расписание».
+    """
+    words = [normalise(word) for word in re.split(r"[^\w]+", instruction or "")]
+    words = [word for word in words if len(word) >= MIN_NAME_LENGTH]
+
+    numbered = [word for word in words if any(ch.isdigit() for ch in word)]
+    if numbered:
+        return numbered
+    # Без цифр короткие слова только мешают: «на», «по», «и».
+    return [word for word in words if len(word) >= 3]
+
+
+def candidates(rows: list[list[str]], instruction: str) -> tuple[list[tuple[int, str]], bool]:
+    """Подходящие столбцы и признак того, что они подобраны по просьбе.
+
+    Без просьбы вернутся все столбцы с matched=False: выбирать придётся
+    человеку. С просьбой, которой ничего не отвечает, вернётся пусто — на
+    этом листе искать нечего.
+    """
+    columns = list_columns(rows)
+    wanted = normalise(instruction)
+    if not wanted or not columns:
+        return columns, False
+
+    # Сначала точное: название столбца целиком названо в просьбе.
+    exact = [item for item in columns if normalise(item[1]) in wanted]
+    if exact:
+        return exact, True
+
+    # Иначе по приметам: «расписание 11е» -> «11е инж», «11е УТ», «11е ИТ».
+    tokens = _tokens(instruction)
+    partial = [
+        item
+        for item in columns
+        if any(token in normalise(item[1]) for token in tokens)
+    ]
+    return partial, bool(partial)
+
+
+def narrow_or_ask(rows: list[list[str]], instruction: str) -> tuple[str, str]:
+    """Сужает таблицу до нужного столбца или просит выбрать.
+
+    Возвращает (текст, имя столбца). Если подходящих столбцов несколько,
+    бросает ColumnChoiceNeeded со списком названий: разбирать всю таблицу
+    в таком случае нельзя, модель слепит события из заголовков.
+    """
+    columns = list_columns(rows)
+    if not columns:
+        # Не таблица с колонками — отдаём как есть.
+        return to_text(rows), ""
+
+    found, matched = candidates(rows, instruction)
+    if len(found) == 1:
+        column, name = found[0]
+        return narrow(rows, column), name
+    if found:
+        raise ColumnChoiceNeeded([name for _, name in found], matched=matched)
+    if matched:
+        return to_text(rows), ""
+    raise ColumnChoiceNeeded([name for _, name in columns], matched=False)
 
 
 def narrow(rows: list[list[str]], column: int, separator: str = " | ") -> str:

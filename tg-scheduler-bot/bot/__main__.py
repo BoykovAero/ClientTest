@@ -188,6 +188,7 @@ def build_application(config: Config) -> Application:
     application.add_handler(CallbackQueryHandler(scheduler_bot.on_back, pattern=r"^back:"))
     application.add_handler(CallbackQueryHandler(scheduler_bot.on_move, pattern=r"^move:"))
     application.add_handler(CallbackQueryHandler(scheduler_bot.on_note, pattern=r"^note:"))
+    application.add_handler(CallbackQueryHandler(scheduler_bot.on_column, pattern=r"^col:"))
     application.add_handler(CallbackQueryHandler(scheduler_bot.on_category, pattern=r"^cat:"))
     application.add_handler(
         CallbackQueryHandler(scheduler_bot.on_set_category, pattern=r"^setcat:")

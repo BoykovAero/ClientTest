@@ -22,6 +22,7 @@ from telegram.ext import ContextTypes
 from bot.calendars.base import CalendarEntry, CalendarError, Event, SaveResult
 from bot.categories import CATEGORIES
 from bot.documents import DocumentError, extract_text, is_large, kind_of
+from bot.grid import ColumnChoiceNeeded
 from bot.llm import WORKS, WORKS_WITH_VISION, available_models, probe_all
 from bot.parser import ParseError, split_into_chunks
 from bot.sheets import SheetsError, find_link, looks_like_sheet, strip_link
@@ -61,6 +62,9 @@ PENDING_KEY = "pending_events"
 DELETE_LIMIT = 20
 # Сколько показанных списков помнить: по ним работают кнопки под сообщениями.
 LISTING_MEMORY = 50
+# Сколько столбцов предлагать на выбор и сколько источников помнить.
+COLUMN_LIMIT = 12
+SOURCE_MEMORY = 5
 # Дни недели для заголовка списка.
 WEEKDAYS = (
     "Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье",
@@ -91,6 +95,8 @@ class SchedulerBot:
         # У кого что сейчас спрошено: id пользователя -> (что, список, номер,
         # сообщение с карточкой). Ответ придёт обычным сообщением.
         self._awaiting: dict[int, tuple[str, str, str, object]] = {}
+        # Таблицы и файлы, из которых ещё предстоит выбрать столбец.
+        self._pending_sources: dict[str, tuple] = {}
 
     # ─── авторизация ────────────────────────────────────────────────────────
     def _authorized(self, update: Update) -> bool:
@@ -676,6 +682,14 @@ class SchedulerBot:
             text, column = await asyncio.to_thread(
                 self._sheets.read, sheet_id, gid, instruction
             )
+        except ColumnChoiceNeeded as choice:
+            # Столбцов несколько, и какой нужен — неясно. Разбирать всю
+            # таблицу нельзя: модель слепит события из заголовков.
+            await _drop(notice)
+            await self._ask_column(
+                update, choice.choices, ("sheet", sheet_id, gid), choice.matched
+            )
+            return
         except SheetsError as exc:
             logger.warning("Таблица не прочитана: %s", exc)
             await _drop(notice)
@@ -685,6 +699,80 @@ class SchedulerBot:
         logger.info("Таблица прочитана, %d символов", len(text))
         await _drop(notice)
         await self._propose(update, text, instruction, column)
+
+    async def _ask_column(
+        self, update: Update, choices: list[str], source: tuple, matched: bool = True
+    ) -> None:
+        """Предлагает выбрать столбец кнопками."""
+        token = uuid.uuid4().hex[:8]
+        shown = choices[:COLUMN_LIMIT]
+        self._pending_sources[token] = (source, shown)
+        while len(self._pending_sources) > SOURCE_MEMORY:
+            self._pending_sources.pop(next(iter(self._pending_sources)))
+
+        buttons = [
+            InlineKeyboardButton(name, callback_data=f"col:{token}:{index}")
+            for index, name in enumerate(shown)
+        ]
+        rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
+        head = (
+            "Под твою просьбу подходит несколько столбцов. Какой брать?"
+            if matched
+            else "В таблице много столбцов, а в просьбе не названо, какой нужен."
+        )
+        tail = ""
+        if len(choices) != len(shown):
+            tail = (
+                f"\n\nПоказал первые {COLUMN_LIMIT} из {len(choices)}. "
+                "Нужного нет — назови его в подписи, например «расписание 11е инж»."
+            )
+        await update.message.reply_text(
+            f"{head}{tail}", reply_markup=InlineKeyboardMarkup(rows)
+        )
+
+    async def on_column(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Столбец выбран — читаем источник заново уже по нему."""
+        if not self._authorized(update):
+            return
+
+        query = update.callback_query
+        await query.answer()
+        _, _, rest = (query.data or "").partition(":")
+        token, _, index = rest.partition(":")
+        known = self._pending_sources.get(token)
+
+        if known is None or not index.isdigit() or int(index) >= len(known[1]):
+            await query.edit_message_text("Список устарел — пришли таблицу заново.")
+            return
+
+        source, choices = known
+        name = choices[int(index)]
+        await query.edit_message_text(f"Беру столбец «{name}»…")
+
+        try:
+            if source[0] == "sheet":
+                _, sheet_id, gid = source
+                text, column = await asyncio.to_thread(
+                    self._sheets.read, sheet_id, gid, name
+                )
+            else:
+                _, filename, data = source
+                text, column = await asyncio.to_thread(
+                    extract_text, filename, data, name
+                )
+        except ColumnChoiceNeeded:
+            # Название столбца пришло от нас самих, так что сюда попасть
+            # нельзя; если попали — честнее сказать, чем молча гадать.
+            await query.edit_message_text("Не смог сузить таблицу до этого столбца.")
+            return
+        except (SheetsError, DocumentError) as exc:
+            logger.warning("Источник не прочитан: %s", exc)
+            await query.edit_message_text(f"Не смог прочитать: {exc}")
+            return
+
+        self._pending_sources.pop(token, None)
+        await _drop(query.message)
+        await self._propose(update, text, name, column or name)
 
     async def on_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
@@ -757,6 +845,11 @@ class SchedulerBot:
                 text, column = await asyncio.to_thread(
                     extract_text, filename, data, instruction
                 )
+        except ColumnChoiceNeeded as choice:
+            await self._ask_column(
+                update, choice.choices, ("file", filename, data), choice.matched
+            )
+            return
         except (DocumentError, VisionError) as exc:
             logger.warning("Файл %r не прочитан: %s", filename, exc)
             await message.reply_text(f"Не смог прочитать файл: {exc}")

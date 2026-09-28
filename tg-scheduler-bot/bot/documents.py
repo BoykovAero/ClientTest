@@ -12,7 +12,7 @@ import io
 import logging
 from pathlib import PurePosixPath
 
-from bot.grid import fill_merges, find_column, narrow, to_text
+from bot.grid import ColumnChoiceNeeded, fill_merges, narrow_or_ask
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +161,10 @@ def _from_xlsx(data: bytes, instruction: str = "") -> tuple[str, str]:
 
     parts: list[str] = []
     column_name = ""
+    # Варианты столбцов со всех листов. Подобранные по просьбе показываем
+    # вместо общего списка: их единицы, а не вся школа.
+    matched: dict[str, None] = {}
+    asked: dict[str, None] = {}
     try:
         for sheet in workbook.worksheets:
             rows = [
@@ -176,12 +180,16 @@ def _from_xlsx(data: bytes, instruction: str = "") -> tuple[str, str]:
             ]
             grid = fill_merges(rows, merges)
 
-            found = find_column(grid, instruction) if instruction else None
-            if found is not None:
-                column, column_name = found
-                body = narrow(grid, column)
-            else:
-                body = to_text(grid)
+            try:
+                body, name = narrow_or_ask(grid, instruction)
+            except ColumnChoiceNeeded as choice:
+                # На этом листе нужного столбца нет. Спросим, только если
+                # его не найдётся ни на одном.
+                target = matched if choice.matched else asked
+                target.update(dict.fromkeys(choice.choices))
+                continue
+            if name:
+                column_name = name
 
             if not body:
                 continue
@@ -190,4 +198,9 @@ def _from_xlsx(data: bytes, instruction: str = "") -> tuple[str, str]:
             parts.append(body)
     finally:
         workbook.close()
+
+    if not parts and (matched or asked):
+        raise ColumnChoiceNeeded(
+            list(matched or asked), matched=bool(matched)
+        )
     return "\n".join(parts), column_name
