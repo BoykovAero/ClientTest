@@ -27,6 +27,7 @@ from bot.calendars.google import GoogleCalendar
 from bot.calendars.icloud import ICloudCalendar
 from bot.categories import CATEGORIES
 from bot.config import Config, ConfigError, load_config
+from bot.memory import Memory
 from bot.parser import PlanParser
 from bot.telegram_bot import SchedulerBot, clear_webhook, on_error
 from bot.transcribe import Transcriber
@@ -153,6 +154,7 @@ def build_application(config: Config) -> Application:
         image_reader=ImageReader(openai_client, config.openai_vision_model),
         openai_client=openai_client,
         sheets=SheetsReader(config.google_service_account_info),
+        memory=Memory(config.memory_file),
         google=google,
         icloud=icloud,
     )
@@ -171,6 +173,9 @@ def build_application(config: Config) -> Application:
     application.add_handler(CommandHandler("plan", scheduler_bot.plan))
     application.add_handler(CommandHandler("today", scheduler_bot.today))
     application.add_handler(CommandHandler("models", scheduler_bot.models))
+    application.add_handler(CommandHandler("memory", scheduler_bot.memory))
+    application.add_handler(CommandHandler("note", scheduler_bot.note))
+    application.add_handler(CommandHandler("forget", scheduler_bot.forget))
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, scheduler_bot.on_text)
     )

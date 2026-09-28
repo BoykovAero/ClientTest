@@ -57,6 +57,7 @@ SYSTEM_PROMPT = """\
 - «утром» — 09:00, «днём» — 14:00, «вечером» — 19:00, «ночью» — 22:00, если точнее не сказано.
 - Время без уточнения части суток трактуй по здравому смыслу: «в 7» про ужин — это 19:00.
 - Если в тексте нет ни одного дела, верни {"events": []}.
+- Память и недавний разговор даны, чтобы понять уточнение («нет, по дням», «перенеси это на завтра»). События бери только из блока «Текст», а не из разговора.
 - Не придумывай события, которых нет в тексте.
 - Если пользователь просит выбрать что-то конкретное, возьми только это, а остальное пропусти. Расписание может быть большим — не переноси его целиком.
 """
@@ -96,19 +97,27 @@ class ParseError(RuntimeError):
 
 
 def build_user_prompt(
-    text: str, now: datetime, timezone_name: str, instruction: str = ""
+    text: str,
+    now: datetime,
+    timezone_name: str,
+    instruction: str = "",
+    memory: str = "",
 ) -> str:
-    """Контекст времени, просьба пользователя и сам текст.
+    """Контекст времени, память, просьба пользователя и сам текст.
 
     Просьба идёт до текста и отдельным блоком: к файлу её пишут подписью
     («добавь расписание 11е инж»), и без неё модель пытается перенести всё
-    расписание целиком.
+    расписание целиком. Память идёт ещё раньше: она объясняет короткие
+    уточнения вроде «нет, по дням», которые сами по себе не план.
     """
     weekday = WEEKDAYS_RU[now.weekday()]
     parts = [
         f"Сейчас: {now:%Y-%m-%d %H:%M} ({weekday}), тайм-зона {timezone_name}.",
         f"Сегодня {now:%Y-%m-%d}, завтра {now.date() + timedelta(days=1)}.",
     ]
+    if memory.strip():
+        parts.append("")
+        parts.append(memory.strip())
     if instruction.strip():
         parts.append("")
         parts.append(f"Просьба пользователя: {instruction.strip()}")
@@ -323,6 +332,7 @@ class PlanParser:
         now: datetime | None = None,
         instruction: str = "",
         on_progress=None,
+        memory: str = "",
     ) -> list[Event]:
         """Текст -> список событий. Большой текст разбирается частями."""
         moment = now or datetime.now(self._tz)
@@ -335,7 +345,7 @@ class PlanParser:
 
         chunks = split_into_chunks(text)
         if len(chunks) == 1:
-            return await self._parse_piece(chunks[0], moment, instruction)
+            return await self._parse_piece(chunks[0], moment, instruction, memory=memory)
 
         logger.info("Разбор: текст поделён на %d частей", len(chunks))
         limit = asyncio.Semaphore(CHUNK_CONCURRENCY)
@@ -345,7 +355,7 @@ class PlanParser:
             nonlocal done
             async with limit:
                 try:
-                    return await self._parse_piece(chunk, moment, instruction)
+                    return await self._parse_piece(chunk, moment, instruction, memory=memory)
                 except ParseError as exc:
                     # Одна неудачная часть не должна отменять остальные.
                     logger.warning("Разбор: часть не разобралась: %s", exc)
@@ -365,7 +375,12 @@ class PlanParser:
         return events
 
     async def _parse_piece(
-        self, text: str, moment: datetime, instruction: str, depth: int = 0
+        self,
+        text: str,
+        moment: datetime,
+        instruction: str,
+        depth: int = 0,
+        memory: str = "",
     ) -> list[Event]:
         """Часть текста, а если она не далась — её половины по очереди.
 
@@ -374,7 +389,7 @@ class PlanParser:
         подбираем делением, а не гадаем с постоянными.
         """
         try:
-            return await self._parse_chunk(text, moment, instruction)
+            return await self._parse_chunk(text, moment, instruction, memory)
         except ParseError:
             halves = split_into_chunks(text, chunk_chars=max(len(text) // 2, 400))
             if depth >= MAX_RETRY_DEPTH or len(halves) < 2:
@@ -383,13 +398,13 @@ class PlanParser:
                 "Разбор: часть не далась, делю на %d и пробую снова", len(halves)
             )
             groups = [
-                await self._parse_piece(half, moment, instruction, depth + 1)
+                await self._parse_piece(half, moment, instruction, depth + 1, memory)
                 for half in halves
             ]
             return merge_events(groups)
 
     async def _parse_chunk(
-        self, text: str, moment: datetime, instruction: str
+        self, text: str, moment: datetime, instruction: str, memory: str = ""
     ) -> list[Event]:
         try:
             response = await self._client.chat.completions.create(
@@ -402,7 +417,7 @@ class PlanParser:
                     {
                         "role": "user",
                         "content": build_user_prompt(
-                            text, moment, self._timezone_name, instruction
+                            text, moment, self._timezone_name, instruction, memory
                         ),
                     },
                 ],

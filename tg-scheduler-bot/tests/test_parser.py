@@ -485,7 +485,7 @@ class TestRetryBySplitting:
         text = self.schedule(4)
         tried = []
 
-        async def chunk(part, moment, instruction):
+        async def chunk(part, moment, instruction, memory=""):
             tried.append(part)
             if part == text:
                 raise ParseError("модель не смогла уложить ответ в нужный формат")
@@ -503,7 +503,7 @@ class TestRetryBySplitting:
         parser = self.parser()
         tried = []
 
-        async def chunk(part, moment, instruction):
+        async def chunk(part, moment, instruction, memory=""):
             tried.append(part)
             raise ParseError("не уложилась")
 

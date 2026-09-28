@@ -5,6 +5,10 @@ token.json
 *.pem
 *.key
 
+# Память бота — это переписка, ей в репозитории не место
+data/
+memory.json
+
 # Python
 __pycache__/
 *.py[cod]

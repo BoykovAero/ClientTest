@@ -25,6 +25,7 @@ from bot.categories import CATEGORIES
 from bot.documents import DocumentError, extract_text, is_large, kind_of
 from bot.grid import ColumnChoiceNeeded
 from bot.llm import WORKS, WORKS_WITH_VISION, available_models, probe_all
+from bot.memory import Memory
 from bot.parser import ParseError, split_into_chunks
 from bot.sheets import SheetsError, find_link, looks_like_sheet, strip_link
 from bot.timeedit import TimeEditError, parse_new_time
@@ -77,10 +78,13 @@ PREVIEW_LIMIT = 30
 class SchedulerBot:
     def __init__(
         self, config, parser, transcriber, image_reader, openai_client, google, icloud,
-        sheets=None,
+        sheets=None, memory=None,
     ) -> None:
         self._config = config
         self._sheets = sheets
+        # Разговор и заметки о человеке. Без памяти бот тоже работает —
+        # просто каждый раз начинает знакомство заново.
+        self._memory = memory if memory is not None else Memory()
         self._openai_client = openai_client
         self._parser = parser
         self._transcriber = transcriber
@@ -660,6 +664,57 @@ class SchedulerBot:
 
         await notice.edit_text("\n".join(lines))
 
+    async def memory(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Показывает, что бот помнит. Память видна человеку целиком."""
+        if not self._authorized(update):
+            return
+
+        user_id = update.effective_user.id
+        notes = self._memory.notes(user_id)
+        turns = self._memory.recent(user_id, limit=10)
+        if not notes and not turns:
+            await update.message.reply_text(
+                "Пока ничего не помню. Разговор запоминается сам, а «/note ...» "
+                "добавит то, что стоит держать в голове всегда."
+            )
+            return
+
+        lines: list[str] = []
+        if notes:
+            lines.append("Помню про тебя:")
+            lines += [f"• {note}" for note in notes]
+            lines.append("")
+        if turns:
+            lines.append("Последнее из разговора:")
+            for turn in turns:
+                lines.append(f"• {turn.you}")
+                lines.append(f"  → {turn.bot}")
+        lines.append("")
+        lines.append("Забыть всё — /forget")
+        await update.message.reply_text("\n".join(lines))
+
+    async def note(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """«/note латинский по вторникам» — то, что помнится всегда."""
+        if not self._authorized(update):
+            return
+
+        text = " ".join(context.args) if context and context.args else ""
+        if not text.strip():
+            await update.message.reply_text(
+                "Напиши, что запомнить: «/note физика с Ильёй по четвергам»."
+            )
+            return
+
+        self._memory.note(update.effective_user.id, text)
+        await update.message.reply_text(f"Запомнил: {text.strip()}")
+
+    async def forget(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._authorized(update):
+            return
+
+        self._memory.forget(update.effective_user.id)
+        await update.message.reply_text("Забыл разговор и заметки.")
+
     # ─── сообщения ──────────────────────────────────────────────────────────
     async def on_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
@@ -923,6 +978,12 @@ class SchedulerBot:
         # Столбец выбирают кнопкой, а у нажатия кнопки нет update.message:
         # отвечаем в чат, а не ответом на исходное сообщение.
         chat = update.effective_chat
+        user_id = update.effective_user.id
+        # В памяти держим просьбу, а не само расписание: оно на десять
+        # тысяч знаков и в разговоре ничего не объясняет.
+        asked = instruction.strip()
+        if not asked:
+            asked = f"прислал таблицу, столбец «{column}»" if column else "прислал таблицу"
         await self._typing(update)
 
         notice = None
@@ -937,12 +998,17 @@ class SchedulerBot:
 
         try:
             events = await self._parser.parse(
-                text, instruction=instruction, on_progress=progress
+                text,
+                instruction=instruction,
+                on_progress=progress,
+                memory=self._memory.as_prompt(user_id),
             )
         except ParseError as exc:
             logger.warning("Разбор файла не удался: %s", exc)
             await _drop(notice)
-            await chat.send_message(f"Не смог разобрать расписание: {exc}")
+            reply = f"Не смог разобрать расписание: {exc}"
+            self._memory.remember(user_id, asked, reply)
+            await chat.send_message(reply)
             await _send_source(chat, text)
             return
 
@@ -953,9 +1019,9 @@ class SchedulerBot:
                 else ""
             )
             await _drop(notice)
-            await chat.send_message(
-                f"В файле не нашлось подходящих дел с датой или временем.{hint}"
-            )
+            reply = f"В файле не нашлось подходящих дел с датой или временем.{hint}"
+            self._memory.remember(user_id, asked, reply)
+            await chat.send_message(reply)
             await _send_source(chat, text)
             return
 
@@ -969,6 +1035,7 @@ class SchedulerBot:
             lines.append(f"…и ещё {len(events) - PREVIEW_LIMIT}")
         lines.append("")
         lines.append("Записывать в календари?")
+        self._memory.remember(user_id, asked, f"нашёл {len(events)} дел, спросил про запись")
 
         keyboard = InlineKeyboardMarkup(
             [
@@ -1009,6 +1076,10 @@ class SchedulerBot:
             reports.append(self._format_event(event, results))
 
         header = f"{_plural(len(events))}:"
+        written = ", ".join(event.title for event in events[:PREVIEW_LIMIT])
+        self._memory.remember(
+            query.from_user.id, "записать найденное", f"записал: {written}"
+        )
         await _drop(query.message)
         await query.message.chat.send_message(header + "\n\n" + "\n\n".join(reports))
 
@@ -1026,17 +1097,23 @@ class SchedulerBot:
     async def _process(self, update: Update, text: str) -> None:
         """Текст -> события -> оба календаря -> отчёт пользователю."""
         await self._typing(update)
+        user_id = update.effective_user.id
 
         try:
-            events = await self._parser.parse(text)
+            events = await self._parser.parse(
+                text, memory=self._memory.as_prompt(user_id)
+            )
         except ParseError as exc:
             logger.warning("Разбор не удался: %s", exc)
-            await update.message.reply_text(f"Не смог разобрать план: {exc}")
+            await self._answer(update, text, f"Не смог разобрать план: {exc}")
             return
 
         if not events:
-            await update.message.reply_text(
-                "Не нашёл здесь ни одного дела. Попробуй назвать время и что именно делаешь."
+            await self._answer(
+                update,
+                text,
+                "Не нашёл здесь ни одного дела. "
+                "Попробуй назвать время и что именно делаешь.",
             )
             return
 
@@ -1046,7 +1123,12 @@ class SchedulerBot:
             reports.append(self._format_event(event, results))
 
         header = f"{_plural(len(events))}:"
-        await update.message.reply_text(header + "\n\n" + "\n\n".join(reports))
+        await self._answer(update, text, header + "\n\n" + "\n\n".join(reports))
+
+    async def _answer(self, update: Update, asked: str, reply: str) -> None:
+        """Отвечает и запоминает ход разговора — оба всегда вместе."""
+        self._memory.remember(update.effective_user.id, asked, reply)
+        await update.effective_chat.send_message(reply)
 
     async def _save(self, event: Event) -> list[SaveResult]:
         """Пишет событие в календари параллельно.

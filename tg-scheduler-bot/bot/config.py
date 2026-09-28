@@ -56,6 +56,7 @@ class Config:
     default_event_minutes: int
 
     log_level: str
+    memory_file: Path
 
     @property
     def timezone_name(self) -> str:
@@ -263,6 +264,11 @@ def load_config(env_file: Path | None = None) -> Config:
             "python3 google_auth_setup.py (DEPLOY.md, шаг 4)."
         )
 
+    # Память переживает перезапуск только вместе с каталогом: на Railway
+    # это подключённый том, иначе файл исчезает вместе с контейнером.
+    state_dir = Path(os.environ.get("STATE_DIR", "").strip() or BASE_DIR / "data")
+    memory_file = state_dir / "memory.json"
+
     if missing:
         problems.insert(0, "Не заданы обязательные переменные: " + ", ".join(missing))
     if problems:
@@ -290,4 +296,5 @@ def load_config(env_file: Path | None = None) -> Config:
         daily_prompt_time=daily_prompt_time,
         default_event_minutes=default_event_minutes,
         log_level=os.environ.get("LOG_LEVEL", "INFO").strip().upper() or "INFO",
+        memory_file=memory_file,
     )

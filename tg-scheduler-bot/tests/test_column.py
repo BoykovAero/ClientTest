@@ -100,7 +100,7 @@ class FakeParser:
     def __init__(self) -> None:
         self.seen: list[str] = []
 
-    async def parse(self, text, instruction="", on_progress=None):
+    async def parse(self, text, instruction="", on_progress=None, memory=""):
         self.seen.append(text)
         return [
             Event(
@@ -283,12 +283,12 @@ async def test_chuzhoy_nazhatie_ignoriruem():
 class EmptyParser:
     """Разбор прошёл, но дел не нашлось."""
 
-    async def parse(self, text, instruction="", on_progress=None):
+    async def parse(self, text, instruction="", on_progress=None, memory=""):
         return []
 
 
 class FailingParser:
-    async def parse(self, text, instruction="", on_progress=None):
+    async def parse(self, text, instruction="", on_progress=None, memory=""):
         raise ParseError("модель вернула не JSON")
 
 
