@@ -1,0 +1,23 @@
+# Секреты не должны попасть в образ ни при каких обстоятельствах
+.env
+*.env
+credentials.json
+token.json
+service-account*.json
+*.pem
+*.key
+
+# Лишнее для рантайма
+.git/
+.gitignore
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+tests/
+*.md
+deploy.sh
+setup_env.py
+google_auth_setup.py
+tg-scheduler-bot.service
