@@ -442,3 +442,73 @@ class TestChainedEnds:
 
     def test_event_without_any_time_is_skipped(self):
         assert parse({"events": [{"title": "Просто дело"}]}) == []
+
+
+class TestRetryBySplitting:
+    """Часть, не уложившаяся в формат, пробуется половинами.
+
+    Сколько событий модель вытягивает за раз — у каждой своё, и предел
+    подбирается делением. Без этого целая неделя падала одним отказом.
+    """
+
+    @staticmethod
+    def parser():
+        from bot.parser import PlanParser
+
+        return PlanParser(
+            client=None, model="m", tz=MSK, timezone_name="Europe/Moscow",
+            default_minutes=30,
+        )
+
+    @staticmethod
+    def schedule(days: int) -> str:
+        lines = []
+        for number in range(days):
+            lines.append(f"день {number}")
+            lines += [f"{h}:00-{h}:40 | урок {number}.{h}" for h in range(9, 19)]
+        return "\n".join(lines)
+
+    @staticmethod
+    def event(title: str):
+        from bot.calendars.base import Event
+
+        return Event(
+            title=title,
+            start=datetime(2026, 9, 28, 9, 0, tzinfo=MSK),
+            end=datetime(2026, 9, 28, 10, 0, tzinfo=MSK),
+        )
+
+    async def test_celoe_ne_dalos_a_polovinami_vyshlo(self):
+        from bot.parser import ParseError
+
+        parser = self.parser()
+        text = self.schedule(4)
+        tried = []
+
+        async def chunk(part, moment, instruction):
+            tried.append(part)
+            if part == text:
+                raise ParseError("модель не смогла уложить ответ в нужный формат")
+            return [self.event(f"дело {len(tried)}")]
+
+        parser._parse_chunk = chunk
+        events = await parser._parse_piece(text, datetime.now(MSK), "")
+
+        assert len(tried) > 1
+        assert events
+
+    async def test_delenie_ne_beskonechnoe(self):
+        from bot.parser import ParseError
+
+        parser = self.parser()
+        tried = []
+
+        async def chunk(part, moment, instruction):
+            tried.append(part)
+            raise ParseError("не уложилась")
+
+        parser._parse_chunk = chunk
+        with pytest.raises(ParseError):
+            await parser._parse_piece(self.schedule(4), datetime.now(MSK), "")
+
+        assert len(tried) < 20

@@ -62,17 +62,20 @@ SYSTEM_PROMPT = """\
 """
 
 # Ответ с событиями не должен обрываться на середине: оборванный JSON
-# провайдер отвергает целиком (json_validate_failed). Школьный день — это
-# полтора десятка уроков, и на учебную неделю ответ заметно длиннее, чем
-# кажется по объёму исходника.
-MAX_RESPONSE_TOKENS = 8000
+# провайдер отвергает целиком (json_validate_failed). Предел не поднимаем:
+# у провайдеров он свой, и слишком большой запрос отвергается уже целиком,
+# на каждом разборе. Вместо этого спрашиваем меньше за раз.
+MAX_RESPONSE_TOKENS = 4000
 
 # Большой текст разбирается частями: маленькие модели не удерживают
-# в формате ответ сразу по целому расписанию. Часть примерно на два
-# школьных дня — столько уроков модель успевает выписать до предела.
-CHUNK_CHARS = 3000
+# в формате ответ сразу по целому расписанию. Часть — примерно школьный
+# день: полтора десятка уроков укладываются в предел с запасом.
+CHUNK_CHARS = 2000
 # Верхний предел на число частей — страховка от обработки гигантского файла.
 MAX_CHUNKS = 24
+# Часть, которая всё же не далась, делится пополам и пробуется снова:
+# истинный предел у каждой модели свой, и подобрать его можно только так.
+MAX_RETRY_DEPTH = 2
 # Начало дня в расписании: «понедельник | 11е инж». Название дня стоит
 # один раз, поэтому разрыв части внутри дня оставляет остаток уроков без
 # даты — модель домысливает её наугад.
@@ -332,7 +335,7 @@ class PlanParser:
 
         chunks = split_into_chunks(text)
         if len(chunks) == 1:
-            return await self._parse_chunk(chunks[0], moment, instruction)
+            return await self._parse_piece(chunks[0], moment, instruction)
 
         logger.info("Разбор: текст поделён на %d частей", len(chunks))
         limit = asyncio.Semaphore(CHUNK_CONCURRENCY)
@@ -342,7 +345,7 @@ class PlanParser:
             nonlocal done
             async with limit:
                 try:
-                    return await self._parse_chunk(chunk, moment, instruction)
+                    return await self._parse_piece(chunk, moment, instruction)
                 except ParseError as exc:
                     # Одна неудачная часть не должна отменять остальные.
                     logger.warning("Разбор: часть не разобралась: %s", exc)
@@ -360,6 +363,30 @@ class PlanParser:
                 "подписью или прислать кусок расписания поменьше"
             )
         return events
+
+    async def _parse_piece(
+        self, text: str, moment: datetime, instruction: str, depth: int = 0
+    ) -> list[Event]:
+        """Часть текста, а если она не далась — её половины по очереди.
+
+        Отказ «не уложилась в формат» означает одно: за раз спрошено больше,
+        чем модель вытягивает. Сколько именно — заранее неизвестно, поэтому
+        подбираем делением, а не гадаем с постоянными.
+        """
+        try:
+            return await self._parse_chunk(text, moment, instruction)
+        except ParseError:
+            halves = split_into_chunks(text, chunk_chars=max(len(text) // 2, 400))
+            if depth >= MAX_RETRY_DEPTH or len(halves) < 2:
+                raise
+            logger.info(
+                "Разбор: часть не далась, делю на %d и пробую снова", len(halves)
+            )
+            groups = [
+                await self._parse_piece(half, moment, instruction, depth + 1)
+                for half in halves
+            ]
+            return merge_events(groups)
 
     async def _parse_chunk(
         self, text: str, moment: datetime, instruction: str
