@@ -419,6 +419,9 @@ class SchedulerBot:
             return False
 
         kind, token, number, card = waiting
+        if kind == "column":
+            return await self._answer_column(update, text, token)
+
         entry = self._entry(token, number)
         if entry is None:
             self._awaiting.pop(update.effective_user.id, None)
@@ -427,6 +430,22 @@ class SchedulerBot:
         if kind == "time":
             return await self._answer_time(update, text, entry, token, number, card)
         return await self._answer_note(update, text, entry, token, card)
+
+    async def _answer_column(self, update: Update, text: str, token: str) -> bool:
+        """Название столбца, присланное текстом.
+
+        Столбцов бывает под сотню, в кнопки влезает дюжина — свой класс
+        проще написать, чем искать. Само сообщение и есть просьба.
+        """
+        known = self._pending_sources.get(token)
+        if known is None or find_link(text) is not None:
+            # Источник забыт или прислана новая таблица — это уже не ответ.
+            self._awaiting.pop(update.effective_user.id, None)
+            return False
+
+        self._awaiting.pop(update.effective_user.id, None)
+        await self._read_source(update, known[0], text, token)
+        return True
 
     async def _answer_time(
         self, update: Update, text: str, entry: CalendarEntry, token, number, card
@@ -701,37 +720,53 @@ class SchedulerBot:
         await self._propose(update, text, instruction, column)
 
     async def _ask_column(
-        self, update: Update, choices: list[str], source: tuple, matched: bool = True
+        self,
+        update: Update,
+        choices: list[str],
+        source: tuple,
+        matched: bool = True,
+        tried: str = "",
     ) -> None:
-        """Предлагает выбрать столбец кнопками."""
+        """Предлагает выбрать столбец: кнопками, а если их мало — текстом."""
         token = uuid.uuid4().hex[:8]
         shown = choices[:COLUMN_LIMIT]
         self._pending_sources[token] = (source, shown)
         while len(self._pending_sources) > SOURCE_MEMORY:
             self._pending_sources.pop(next(iter(self._pending_sources)))
+        # Следующее сообщение — это ответ на вопрос, а не новый план.
+        self._awaiting[update.effective_user.id] = ("column", token, "", None)
 
         buttons = [
             InlineKeyboardButton(name, callback_data=f"col:{token}:{index}")
             for index, name in enumerate(shown)
         ]
         rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
-        head = (
-            "Под твою просьбу подходит несколько столбцов. Какой брать?"
-            if matched
-            else "В таблице много столбцов, а в просьбе не названо, какой нужен."
+        rows.append(
+            [InlineKeyboardButton("Не надо", callback_data=f"col:{token}:cancel")]
         )
+        if matched:
+            head = "Под твою просьбу подходит несколько столбцов. Какой брать?"
+        elif tried:
+            # Человек назвал столбец сам, и мы его не нашли. Общая фраза про
+            # «не названо» тут сбивала бы с толку.
+            head = f"Столбца «{tried}» в таблице нет. Вот какие есть."
+        else:
+            head = "В таблице много столбцов, а в просьбе не названо, какой нужен."
         tail = ""
         if len(choices) != len(shown):
+            # Столбцов бывает под сотню — в кнопки влезает дюжина. Поэтому
+            # главная подсказка здесь про то, что название можно написать.
             tail = (
-                f"\n\nПоказал первые {COLUMN_LIMIT} из {len(choices)}. "
-                "Нужного нет — назови его в подписи, например «расписание 11е инж»."
+                f"\n\nВ кнопках первые {len(shown)} из {len(choices)}. "
+                "Нужного среди них нет — просто напиши название ответом, "
+                "например «11е инж»."
             )
-        await update.message.reply_text(
+        await update.effective_chat.send_message(
             f"{head}{tail}", reply_markup=InlineKeyboardMarkup(rows)
         )
 
     async def on_column(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Столбец выбран — читаем источник заново уже по нему."""
+        """Столбец выбран кнопкой — читаем источник заново уже по нему."""
         if not self._authorized(update):
             return
 
@@ -741,38 +776,56 @@ class SchedulerBot:
         token, _, index = rest.partition(":")
         known = self._pending_sources.get(token)
 
+        if index == "cancel":
+            self._forget_source(update, token)
+            await query.edit_message_text("Хорошо, таблицу не разбираю.")
+            return
+
         if known is None or not index.isdigit() or int(index) >= len(known[1]):
             await query.edit_message_text("Список устарел — пришли таблицу заново.")
             return
 
         source, choices = known
         name = choices[int(index)]
+        self._awaiting.pop(update.effective_user.id, None)
         await query.edit_message_text(f"Беру столбец «{name}»…")
+        await _drop(query.message)
+        await self._read_source(update, source, name, token)
 
+    async def _read_source(
+        self, update: Update, source: tuple, instruction: str, token: str
+    ) -> None:
+        """Перечитывает таблицу или файл с названием столбца как просьбой."""
+        chat = update.effective_chat
         try:
             if source[0] == "sheet":
                 _, sheet_id, gid = source
                 text, column = await asyncio.to_thread(
-                    self._sheets.read, sheet_id, gid, name
+                    self._sheets.read, sheet_id, gid, instruction
                 )
             else:
                 _, filename, data = source
                 text, column = await asyncio.to_thread(
-                    extract_text, filename, data, name
+                    extract_text, filename, data, instruction
                 )
-        except ColumnChoiceNeeded:
-            # Название столбца пришло от нас самих, так что сюда попасть
-            # нельзя; если попали — честнее сказать, чем молча гадать.
-            await query.edit_message_text("Не смог сузить таблицу до этого столбца.")
+        except ColumnChoiceNeeded as choice:
+            # Названо неточно: под просьбу подходит несколько столбцов или
+            # ни одного. Спрашиваем заново, источник при этом не теряем.
+            await self._ask_column(
+                update, choice.choices, source, choice.matched, tried=instruction
+            )
             return
         except (SheetsError, DocumentError) as exc:
             logger.warning("Источник не прочитан: %s", exc)
-            await query.edit_message_text(f"Не смог прочитать: {exc}")
+            await chat.send_message(f"Не смог прочитать: {exc}")
             return
 
+        self._forget_source(update, token)
+        await self._propose(update, text, instruction, column or instruction)
+
+    def _forget_source(self, update: Update, token: str) -> None:
         self._pending_sources.pop(token, None)
-        await _drop(query.message)
-        await self._propose(update, text, name, column or name)
+        self._awaiting.pop(update.effective_user.id, None)
 
     async def on_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):

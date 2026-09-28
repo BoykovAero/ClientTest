@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from bot.calendars.base import Event
+from bot.grid import ColumnChoiceNeeded
 from bot.telegram_bot import SchedulerBot
 
 MSK = ZoneInfo("Europe/Moscow")
@@ -78,6 +79,17 @@ class FakeSheets:
         return f"понедельник 09:00 матан ({instruction})", instruction
 
 
+class SheetsAsking:
+    """Столбец не подошёл — источник просит выбрать заново."""
+
+    def __init__(self) -> None:
+        self.asked: list[str] = []
+
+    def read(self, sheet_id, gid="", instruction=""):
+        self.asked.append(instruction)
+        raise ColumnChoiceNeeded(COLUMNS, matched=False)
+
+
 class FakeParser:
     def __init__(self) -> None:
         self.seen: list[str] = []
@@ -142,7 +154,75 @@ async def test_vopros_pokazyvaet_vse_varianty():
         message_update(chat), COLUMNS, ("sheet", "sheet-id", ""), True
     )
     shown = [b.text for row in chat.markups[-1].inline_keyboard for b in row]
-    assert shown == COLUMNS
+    assert shown[: len(COLUMNS)] == COLUMNS
+
+
+async def test_iz_voprosa_est_vyhod():
+    bot, chat = make_bot(), FakeChat()
+    data = await ask(bot, chat)
+    token = data.split(":")[1]
+    update = press(chat, f"col:{token}:cancel")
+
+    await bot.on_column(update, None)
+
+    assert bot._sheets.asked == []
+    assert bot._pending_sources == {}
+    assert bot._awaiting == {}
+
+
+async def test_dlinnyy_spisok_zovyot_napisat_nazvanie():
+    """В кнопки влезает дюжина, а классов в школе под сотню."""
+    chat = FakeChat()
+    await make_bot()._ask_column(
+        message_update(chat), [f"стлб{i}" for i in range(64)], ("sheet", "s", ""), False
+    )
+    assert "напиши название" in chat.sent[-1]
+
+
+# ─── ответ текстом ──────────────────────────────────────────────────────
+
+
+async def test_nazvanie_tekstom_prinimaetsya_kak_otvet():
+    """Столбца нет в кнопках — его пишут сообщением, а не планом на день."""
+    bot, chat = make_bot(), FakeChat()
+    await ask(bot, chat)
+
+    handled = await bot._apply_answer(message_update(chat), "11е инж")
+
+    assert handled
+    assert bot._sheets.asked == ["11е инж"]
+    assert "матан" in chat.sent[-1]
+
+
+async def test_posle_otveta_tekstom_vopros_zakryt():
+    """Иначе следующий план съедался бы как название столбца."""
+    bot, chat = make_bot(), FakeChat()
+    await ask(bot, chat)
+    await bot._apply_answer(message_update(chat), "11е инж")
+
+    assert bot._awaiting == {}
+    assert await bot._apply_answer(message_update(chat), "в 15:00 зал") is False
+
+
+async def test_novaya_ssylka_ne_schitaetsya_nazvaniem_stolbca():
+    bot, chat = make_bot(), FakeChat()
+    await ask(bot, chat)
+
+    handled = await bot._apply_answer(
+        message_update(chat), "https://docs.google.com/spreadsheets/d/" + "a" * 25
+    )
+
+    assert handled is False
+    assert bot._sheets.asked == []
+
+
+async def test_nesushchestvuyushchiy_stolbec_nazvan_v_otvete():
+    bot, chat = make_bot(SheetsAsking()), FakeChat()
+    await ask(bot, chat)
+
+    await bot._apply_answer(message_update(chat), "11е физ")
+
+    assert "«11е физ»" in chat.sent[-1]
 
 
 # ─── ответ ──────────────────────────────────────────────────────────────
