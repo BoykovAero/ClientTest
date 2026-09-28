@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -61,14 +62,25 @@ SYSTEM_PROMPT = """\
 """
 
 # Ответ с событиями не должен обрываться на середине: оборванный JSON
-# провайдер отвергает целиком.
-MAX_RESPONSE_TOKENS = 4000
+# провайдер отвергает целиком (json_validate_failed). Школьный день — это
+# полтора десятка уроков, и на учебную неделю ответ заметно длиннее, чем
+# кажется по объёму исходника.
+MAX_RESPONSE_TOKENS = 8000
 
 # Большой текст разбирается частями: маленькие модели не удерживают
-# в формате ответ сразу по целому расписанию.
-CHUNK_CHARS = 5000
+# в формате ответ сразу по целому расписанию. Часть примерно на два
+# школьных дня — столько уроков модель успевает выписать до предела.
+CHUNK_CHARS = 3000
 # Верхний предел на число частей — страховка от обработки гигантского файла.
-MAX_CHUNKS = 12
+MAX_CHUNKS = 24
+# Начало дня в расписании: «понедельник | 11е инж». Название дня стоит
+# один раз, поэтому разрыв части внутри дня оставляет остаток уроков без
+# даты — модель домысливает её наугад.
+DAY_LINE = re.compile(r"^\s*(?:%s)\b" % "|".join(WEEKDAYS_RU), re.IGNORECASE)
+# Начало листа книги: «# лист: 14.09-20.09». В книге лист на каждую неделю,
+# и понедельник с одного листа — это не понедельник с другого.
+SHEET_LINE = re.compile(r"^#\s*лист:")
+
 # Сколько первых строк считать шапкой и повторять в каждой части: в таблице
 # без неё колонки теряют смысл.
 HEADER_LINES = 3
@@ -203,32 +215,71 @@ def split_into_chunks(
     """Режет текст по строкам на части не длиннее chunk_chars.
 
     Шапка таблицы повторяется в каждой части: без неё строки вида
-    «08:30 | 11а | 11б» теряют привязку к колонкам.
+    «08:30 | 11а | 11б» теряют привязку к колонкам. Так же переносятся лист
+    и день недели: они названы в тексте по одному разу, и часть, начавшаяся
+    с середины дня, иначе осталась бы без даты вовсе.
     """
     if len(text) <= chunk_chars:
         return [text]
 
     lines = text.split("\n")
-    # Шапка оправдана только если таблица заметно длиннее её самой.
-    header = lines[:header_lines] if len(lines) > header_lines * 3 else []
-    header_text = "\n".join(header)
-    body = lines[len(header):]
+    # Шапка оправдана только если таблица заметно длиннее её самой. Лист и
+    # день из неё убираем: они переносятся отдельно и не должны застревать
+    # в постоянной шапке — иначе вторая неделя уедет под заголовок первой.
+    head = lines[:header_lines] if len(lines) > header_lines * 3 else []
+    header = [line for line in head if not _is_context(line)]
+    body = lines[len(head):]
+    base = len("\n".join(header))
 
     chunks: list[str] = []
     current: list[str] = []
-    current_len = len(header_text)
+    sheet = ""  # последняя встреченная строка листа
+    day = ""  # последняя встреченная строка дня
+    # Лист и день могли попасть в саму шапку — тогда цикл их уже не увидит.
+    for line in head:
+        if SHEET_LINE.match(line):
+            sheet, day = line, ""
+        elif DAY_LINE.match(line):
+            day = line
+    carried = [line for line in (sheet, day) if line]
+    current_len = base + sum(len(line) + 1 for line in carried)
+
+    def flush() -> None:
+        nonlocal current, carried
+        if not current:
+            return
+        chunks.append("\n".join(header + carried + current))
+        current = []
+        carried = []
 
     for line in body:
-        if current and current_len + len(line) + 1 > chunk_chars:
-            chunks.append("\n".join(header + current) if header else "\n".join(current))
-            current = []
-            current_len = len(header_text)
+        starts_sheet = bool(SHEET_LINE.match(line))
+        starts_day = bool(DAY_LINE.match(line))
+        too_long = bool(current) and current_len + len(line) + 1 > chunk_chars
+        # Новый день — хорошее место для разрыва, но только если часть уже
+        # набралась: иначе на каждый день уйдёт по отдельному запросу.
+        clean_break = (starts_day or starts_sheet) and current_len > chunk_chars // 2
+        if too_long or clean_break:
+            flush()
+            if sheet and not starts_sheet:
+                carried.append(sheet)
+            if day and not starts_day and not starts_sheet:
+                carried.append(day)
+            current_len = base + sum(len(line) + 1 for line in carried)
+        if starts_sheet:
+            sheet, day = line, ""
+        elif starts_day:
+            day = line
         current.append(line)
         current_len += len(line) + 1
 
-    if current:
-        chunks.append("\n".join(header + current) if header else "\n".join(current))
+    flush()
     return chunks[:MAX_CHUNKS]
+
+
+def _is_context(line: str) -> bool:
+    """Строка, называющая лист или день: её переносят, а не держат в шапке."""
+    return bool(SHEET_LINE.match(line) or DAY_LINE.match(line))
 
 
 def merge_events(groups: list[list[Event]]) -> list[Event]:

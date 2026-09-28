@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 from bot.calendars.base import Event
 from bot.grid import ColumnChoiceNeeded
+from bot.parser import ParseError
 from bot.telegram_bot import SchedulerBot
 
 MSK = ZoneInfo("Europe/Moscow")
@@ -25,10 +26,15 @@ class FakeChat:
     def __init__(self) -> None:
         self.sent: list[str] = []
         self.markups: list = []
+        self.documents: list[str] = []
 
     async def send_message(self, text, reply_markup=None, **kwargs):
         self.sent.append(text)
         self.markups.append(reply_markup)
+        return FakeMessage(self)
+
+    async def send_document(self, document, filename="", caption="", **kwargs):
+        self.documents.append(document.getvalue().decode("utf-8"))
         return FakeMessage(self)
 
     async def send_action(self, *args, **kwargs):
@@ -269,3 +275,46 @@ async def test_chuzhoy_nazhatie_ignoriruem():
     await bot.on_column(update, None)
 
     assert bot._sheets.asked == []
+
+
+# ─── видно, что прочитано ───────────────────────────────────────────────
+
+
+class EmptyParser:
+    """Разбор прошёл, но дел не нашлось."""
+
+    async def parse(self, text, instruction="", on_progress=None):
+        return []
+
+
+class FailingParser:
+    async def parse(self, text, instruction="", on_progress=None):
+        raise ParseError("модель вернула не JSON")
+
+
+async def test_pustoy_razbor_pokazyvaet_prochitannoe():
+    """Иначе о причине можно только гадать: текст таблицы никто не видит."""
+    bot, chat = make_bot(parser=EmptyParser()), FakeChat()
+    await ask(bot, chat)
+
+    await bot._apply_answer(message_update(chat), "11е инж")
+
+    assert chat.documents == ["понедельник 09:00 матан (11е инж)"]
+
+
+async def test_sboy_razbora_pokazyvaet_prochitannoe():
+    bot, chat = make_bot(parser=FailingParser()), FakeChat()
+    await ask(bot, chat)
+
+    await bot._apply_answer(message_update(chat), "11е инж")
+
+    assert chat.documents == ["понедельник 09:00 матан (11е инж)"]
+
+
+async def test_udachnyy_razbor_nichego_lishnego_ne_shlyot():
+    bot, chat = make_bot(), FakeChat()
+    await ask(bot, chat)
+
+    await bot._apply_answer(message_update(chat), "11е инж")
+
+    assert chat.documents == []

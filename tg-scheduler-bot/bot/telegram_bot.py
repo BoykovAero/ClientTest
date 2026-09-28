@@ -12,6 +12,7 @@ import asyncio
 import logging
 import uuid
 from datetime import datetime, timedelta
+from io import BytesIO
 from time import monotonic
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -942,6 +943,7 @@ class SchedulerBot:
             logger.warning("Разбор файла не удался: %s", exc)
             await _drop(notice)
             await chat.send_message(f"Не смог разобрать расписание: {exc}")
+            await _send_source(chat, text)
             return
 
         if not events:
@@ -954,6 +956,7 @@ class SchedulerBot:
             await chat.send_message(
                 f"В файле не нашлось подходящих дел с датой или временем.{hint}"
             )
+            await _send_source(chat, text)
             return
 
         token = uuid.uuid4().hex[:12]
@@ -1105,6 +1108,25 @@ def _day_name(offset: int, day_start: datetime) -> str:
     if offset == -1:
         return "Вчера"
     return WEEKDAYS[day_start.weekday()]
+
+
+async def _send_source(chat, text: str) -> None:
+    """Показывает, что бот вычитал из таблицы.
+
+    Разбор не удался — дальше гадать бессмысленно: причина либо в самом
+    вычитанном тексте, либо в модели, и различить это можно только увидев
+    текст. Отправка файла необязательна, падать из-за неё не из-за чего.
+    """
+    if not text.strip():
+        return
+    try:
+        await chat.send_document(
+            document=BytesIO(text.encode("utf-8")),
+            filename="прочитанное.txt",
+            caption="Вот что я прочитал из таблицы — по этому тексту видно, где сбой.",
+        )
+    except TelegramError:
+        logger.info("Не удалось отправить вычитанный текст")
 
 
 async def _drop(message) -> None:

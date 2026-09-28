@@ -245,6 +245,38 @@ class TestChunking:
         for row in rows:
             assert row in joined
 
+    def test_day_name_reaches_every_chunk(self):
+        """Часть с середины дня без его названия уезжает на чужую дату."""
+        from bot.parser import DAY_LINE, split_into_chunks
+
+        days = ["понедельник", "вторник", "среда", "четверг", "пятница"]
+        lines = []
+        for day in days:
+            lines.append(f"{day} | 11е инж")
+            lines += [f"{h}:00-{h}:40 | урок {day} {h}" for h in range(9, 19)]
+
+        for chunk in split_into_chunks("\n".join(lines), chunk_chars=400, header_lines=0):
+            named = [line for line in chunk.split("\n") if DAY_LINE.match(line)]
+            assert named, chunk
+            assert chunk.split("\n")[0] == named[0]
+
+    def test_sheet_marker_travels_with_its_days(self):
+        """В книге лист на неделю: понедельник одного — не понедельник другого."""
+        from bot.parser import split_into_chunks
+
+        lines = []
+        for sheet in ("первая", "вторая"):
+            lines.append(f"# лист: {sheet}")
+            for day in ("понедельник", "вторник"):
+                lines.append(f"{day} | 11е инж")
+                lines += [f"{h}:00-{h}:40 | урок {sheet} {day} {h}" for h in range(9, 19)]
+
+        chunks = split_into_chunks("\n".join(lines), chunk_chars=400, header_lines=3)
+        for chunk in chunks:
+            about = "вторая" if "вторая" in chunk else "первая"
+            assert f"# лист: {about}" in chunk
+            assert chunk.count("# лист:") == 1
+
     def test_chunk_count_is_capped(self):
         from bot.parser import MAX_CHUNKS, split_into_chunks
 
