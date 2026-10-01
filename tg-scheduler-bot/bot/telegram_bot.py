@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from io import BytesIO
 from time import monotonic
 
@@ -22,6 +22,7 @@ from telegram.ext import ContextTypes
 
 from bot.calendars.base import CalendarEntry, CalendarError, Event, SaveResult
 from bot.categories import CATEGORIES
+from bot.copyday import CopyError, matches, parse_copy
 from bot.documents import DocumentError, extract_text, is_large, kind_of
 from bot.grid import ColumnChoiceNeeded
 from bot.llm import WORKS, WORKS_WITH_VISION, available_models, probe_all
@@ -46,11 +47,14 @@ START_TEXT = (
     "Ещё можно прислать файл с расписанием — Word, Excel, таблицу или "
     "скриншот — либо ссылку на Google Таблицу. Я разберу и покажу список, "
     "прежде чем записывать.\n\n"
+    "Записанное можно повторять: «скопируй математику с понедельника на "
+    "среду», «скопируй весь вторник на завтра».\n\n"
     "Команды:\n"
     "/plan — спросить прямо сейчас\n"
     "/today — список дел по дням: листается стрелками, а по нажатию на "
     "номер событие можно перенести, снабдить заметкой или удалить\n"
-    "/models — какие модели доступны твоему ключу"
+    "/models — какие модели доступны твоему ключу\n"
+    "/memory — что я помню, /note — запомнить навсегда, /forget — забыть"
 )
 
 # Как часто пытаться снять внезапно появившийся вебхук, секунд.
@@ -436,6 +440,65 @@ class SchedulerBot:
             return await self._answer_time(update, text, entry, token, number, card)
         return await self._answer_note(update, text, entry, token, card)
 
+    async def _apply_copy(self, update: Update, text: str) -> bool:
+        """Просьба скопировать дела с одного дня на другие.
+
+        False — текст не про копирование, разбирать его дальше как план.
+        """
+        today = datetime.now(self._config.timezone).date()
+        try:
+            request = parse_copy(text, today)
+        except CopyError as exc:
+            await self._answer(update, text, str(exc))
+            return True
+        if request is None:
+            return False
+
+        await self._typing(update)
+        source_start = self._day_start((request.source - today).days)
+        try:
+            entries = await asyncio.to_thread(self._google.list_day, source_start)
+        except CalendarError as exc:
+            await self._answer(update, text, f"Не смог прочитать календарь: {exc}")
+            return True
+
+        found = [entry for entry in entries if matches(entry.title, request.title)]
+        movable = [entry for entry in found if entry.movable]
+        if not found:
+            await self._answer(update, text, self._nothing_to_copy(request, entries))
+            return True
+
+        reports: list[str] = []
+        copied = 0
+        for target in request.targets:
+            for entry in movable:
+                event = _shift(entry, target)
+                results = await self._save(event)
+                reports.append(self._format_event(event, results))
+                copied += 1
+
+        header = f"Скопировал {_plural_found(copied)} с {source_start:%d.%m}:"
+        lines = [header, ""] if copied else []
+        lines += reports
+        skipped = len(found) - len(movable)
+        if skipped:
+            # У события на весь день нет часов: переносить нечего и некуда.
+            lines.append("")
+            lines.append(f"Пропустил на весь день: {skipped}")
+        if not copied:
+            lines = ["Копировать нечего: всё найденное — события на весь день."]
+        await self._answer(update, text, "\n".join(lines))
+        return True
+
+    def _nothing_to_copy(self, request, entries: list[CalendarEntry]) -> str:
+        """Объясняет, почему копировать нечего, и показывает, что есть."""
+        when = request.source.strftime("%d.%m")
+        if not entries:
+            return f"На {when} ничего не записано — копировать нечего."
+        shown = "\n".join(f"• {entry.as_line()}" for entry in entries[:PREVIEW_LIMIT])
+        about = f"«{request.title}»" if request.title else "подходящего"
+        return f"На {when} не нашёл {about}. Вот что там есть:\n\n{shown}"
+
     async def _answer_column(self, update: Update, text: str, token: str) -> bool:
         """Название столбца, присланное текстом.
 
@@ -726,6 +789,11 @@ class SchedulerBot:
         # Если у события спрошено новое время, это сообщение — ответ на вопрос,
         # а не новый план.
         if await self._apply_answer(update, text):
+            return
+
+        # «Скопируй математику с понедельника на среду» — работа с уже
+        # записанным, модели тут делать нечего.
+        if await self._apply_copy(update, text):
             return
 
         link = find_link(text)
@@ -1190,6 +1258,18 @@ def _day_name(offset: int, day_start: datetime) -> str:
     if offset == -1:
         return "Вчера"
     return WEEKDAYS[day_start.weekday()]
+
+
+def _shift(entry: CalendarEntry, day: date) -> Event:
+    """Та же пара часов, но в другой день. Длительность сохраняется."""
+    start = entry.start.replace(year=day.year, month=day.month, day=day.day)
+    return Event(
+        title=entry.title,
+        start=start,
+        end=start + (entry.end - entry.start),
+        notes=entry.notes,
+        category=entry.category,
+    )
 
 
 async def _send_source(chat, text: str) -> None:
