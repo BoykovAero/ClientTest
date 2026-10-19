@@ -183,12 +183,15 @@ async def test_zametka_i_napravlenie_perenosyatsya():
 
 async def test_na_neskolko_dney_po_kopii_na_kazhdyy():
     google = FakeGoogle([MATH])
-    await make_bot(google)._apply_copy(
-        update(FakeChat()), "скопируй математику с понедельника на среду и пятницу"
-    )
-    assert {event.start.date() for event in google.saved} == {
-        date(2026, 10, 2), date(2026, 10, 7)
-    }
+    text = "скопируй математику с понедельника на среду и пятницу"
+    # Бот считает дни от сегодняшнего, поэтому ожидаемое берём оттуда же:
+    # прибитые к календарю даты сделали бы тест годным ровно один день.
+    expected = set(parse_copy(text, datetime.now(MSK).date()).targets)
+
+    await make_bot(google)._apply_copy(update(FakeChat()), text)
+
+    assert {event.start.date() for event in google.saved} == expected
+    assert len(expected) == 2
 
 
 async def test_ves_den_kopiruetsya_tselikom():
