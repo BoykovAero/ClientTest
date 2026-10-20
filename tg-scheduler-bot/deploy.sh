@@ -18,7 +18,11 @@ SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UNIT_PATH="/etc/systemd/system/${APP_NAME}.service"
 
 # Файлы с секретами: в git их нет, на сервер кладутся вручную (см. DEPLOY.md шаг 4.6)
-SECRETS=(.env credentials.json token.json)
+# .env нужен всегда; файлы OAuth — только если доступ к Google идёт через них.
+SECRETS=(.env)
+OAUTH_SECRETS=(credentials.json token.json)
+# Каталог с памятью бота: его содержимое переживает обновления.
+STATE_SUBDIR="data"
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
@@ -39,6 +43,22 @@ grep -q '^TELEGRAM_BOT_TOKEN=.\+' "${SRC_DIR}/.env" || die "В .env пуст TEL
 grep -q '^ALLOWED_USER_ID=[0-9]\+' "${SRC_DIR}/.env"  || die "В .env пуст или нечисловой ALLOWED_USER_ID."
 grep -q '^OPENAI_API_KEY=.\+' "${SRC_DIR}/.env"       || die "В .env пуст OPENAI_API_KEY."
 
+# Доступ к Google — либо ключ сервисного аккаунта в .env, либо пара файлов
+# OAuth. Требовать и то и другое нельзя: у сервисного аккаунта token.json
+# нет и взяться ему неоткуда.
+if grep -q '^GOOGLE_SERVICE_ACCOUNT_JSON=.\+' "${SRC_DIR}/.env" \
+   || grep -q '^GOOGLE_SERVICE_ACCOUNT_FILE=.\+' "${SRC_DIR}/.env"; then
+    log "Google: ключ сервисного аккаунта из .env"
+else
+    for f in "${OAUTH_SECRETS[@]}"; do
+        [[ -f "${SRC_DIR}/${f}" ]] || die \
+            "Нет ${f} в ${SRC_DIR}, и в .env не задан GOOGLE_SERVICE_ACCOUNT_JSON. \
+Нужно одно из двух: ключ сервисного аккаунта в .env либо пара файлов OAuth (DEPLOY.md, шаг 4.6)."
+        SECRETS+=("${f}")
+    done
+    log "Google: OAuth-файлы ${OAUTH_SECRETS[*]}"
+fi
+
 # ─── Системные пакеты ────────────────────────────────────────────────────────
 log "Ставлю системные пакеты"
 export DEBIAN_FRONTEND=noninteractive
@@ -57,11 +77,15 @@ fi
 log "Копирую код в ${APP_DIR}"
 mkdir -p "${APP_DIR}"
 if [[ "${SRC_DIR}" != "${APP_DIR}" ]]; then
+    # data/ исключён намеренно: там память бота, а --delete стёр бы её при
+    # каждом обновлении — в исходниках этого каталога нет и быть не может.
     rsync -a --delete \
         --exclude 'venv/' --exclude '.venv/' --exclude '.git/' \
         --exclude '__pycache__/' --exclude '*.pyc' \
+        --exclude "${STATE_SUBDIR}/" \
         "${SRC_DIR}/" "${APP_DIR}/"
 fi
+mkdir -p "${APP_DIR}/${STATE_SUBDIR}"
 
 # ─── venv и зависимости ──────────────────────────────────────────────────────
 if [[ ! -x "${APP_DIR}/venv/bin/python" ]]; then
