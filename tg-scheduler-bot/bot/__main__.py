@@ -22,7 +22,6 @@ from telegram.ext import (
     filters,
 )
 
-from bot.calendars.base import CalendarError
 from bot.calendars.google import GoogleCalendar
 from bot.calendars.icloud import ICloudCalendar
 from bot.categories import CATEGORIES
@@ -97,6 +96,34 @@ def build_application(config: Config) -> Application:
         token_file=config.google_token_file,
         service_account_info=config.google_service_account_info,
     )
+    _prepare_calendars(config, google)
+    return _assemble(config, openai_client, google)
+
+
+def _prepare_calendars(config: Config, google: GoogleCalendar) -> None:
+    """Заводит календари направлений и проверяет доступ.
+
+    Ни одна поломка здесь не должна мешать боту подняться. Телеграм — это
+    единственный способ узнать, что с ботом не так; если старт падает из-за
+    недоступного календаря, человек видит молчание и больше ничего, а
+    хостинг перезапускает бота по кругу.
+    """
+    try:
+        _describe_access(config, google)
+    except Exception as exc:
+        logger.error("Google: не удалось выяснить способ доступа — %s", exc)
+
+    # Календари направлений заводит сам бот: они принадлежат сервисному
+    # аккаунту, так что создать их он может без чужой помощи, а человеку
+    # остаётся выбрать им цвета в своём приложении.
+    try:
+        made = google.ensure_calendars(CATEGORIES, share_with=config.google_calendar_id)
+        logger.info("Календари направлений: %s", ", ".join(sorted(made)))
+    except Exception as exc:
+        logger.error("Не удалось завести календари направлений: %s", exc)
+
+
+def _describe_access(config: Config, google: GoogleCalendar) -> None:
     if google.uses_service_account:
         logger.info(
             "Google: сервисный аккаунт %s -> календарь %s",
@@ -105,6 +132,10 @@ def build_application(config: Config) -> Application:
         )
     else:
         logger.info("Google: OAuth-токен -> календарь %s", config.google_calendar_id)
+
+
+def _assemble(config: Config, openai_client, google: GoogleCalendar) -> Application:
+    """Собирает бота и приложение Telegram."""
     # iCloud подключается, только если заданы доступы. Без него события
     # пишутся в один Google — так в приложении календаря не появляется
     # вторая копия каждой записи.
@@ -122,15 +153,6 @@ def build_application(config: Config) -> Application:
     # Проверяем доступ к календарям сразу, чтобы поломка была видна в логе
     # при старте, а не в 08:45 следующего утра. Падать при этом не нужно:
     # временная недоступность сети не повод не отвечать на /start.
-    # Календари направлений заводит сам бот: они принадлежат сервисному
-    # аккаунту, так что создать их он может без чужой помощи, а человеку
-    # остаётся выбрать им цвета в своём приложении.
-    try:
-        made = google.ensure_calendars(CATEGORIES, share_with=config.google_calendar_id)
-        logger.info("Календари направлений: %s", ", ".join(sorted(made)))
-    except CalendarError as exc:
-        logger.error("Не удалось завести календари направлений: %s", exc)
-
     targets = [("Google Calendar", google)]
     if icloud is not None:
         targets.append(("iCloud", icloud))
@@ -138,7 +160,7 @@ def build_application(config: Config) -> Application:
         try:
             calendar.check()
             logger.info("%s: доступ есть", name)
-        except CalendarError as exc:
+        except Exception as exc:
             logger.error("%s: доступа нет — %s", name, exc)
 
     scheduler_bot = SchedulerBot(
@@ -230,7 +252,15 @@ def main() -> int:
     setup_logging(config.log_level)
     logger.info("Запускаюсь, тайм-зона %s", config.timezone_name)
 
-    application = build_application(config)
+    try:
+        application = build_application(config)
+    except Exception:
+        # Сюда доходит только то, что собрать бота по-настоящему не даёт.
+        # Голая трассировка в логах хостинга читается плохо, а понять, на
+        # чём встало, нужно с первого взгляда.
+        logger.exception("Бот не собрался — Telegram даже не запущен")
+        return 1
+
     logger.info("Поллинг Telegram запущен")
     try:
         # Список типов обновлений задаём явно. Если его не передать, Telegram
@@ -253,6 +283,11 @@ def main() -> int:
             "Telegram отверг токен. Проверь TELEGRAM_BOT_TOKEN: "
             "он мог быть отозван через /revoke у @BotFather — тогда нужен новый."
         )
+        return 1
+    except Exception:
+        # Поллинг упал на чём-то своём. Выходим с ошибкой, чтобы хостинг
+        # поднял бота заново, но сначала пишем, на чём именно.
+        logger.exception("Поллинг оборвался")
         return 1
     return 0
 

@@ -94,7 +94,14 @@ class GoogleCalendar:
 
         creds = self._credentials_cache
         if not creds.valid:
-            creds.refresh(Request())
+            # refresh ходит в сеть и бросает своё RefreshError: отозванный
+            # или отключённый ключ, перекошенные часы, недоступный Google.
+            # Наружу всё это должно выходить как CalendarError, иначе падает
+            # не операция с календарём, а весь бот.
+            try:
+                creds.refresh(Request())
+            except Exception as exc:
+                raise CalendarError(f"ключ сервисного аккаунта не принят: {exc}") from exc
         return creds
 
     def _oauth_credentials(self) -> Credentials:
@@ -117,7 +124,10 @@ class GoogleCalendar:
             )
 
         logger.info("Google: токен истёк, обновляю по refresh_token")
-        creds.refresh(Request())
+        try:
+            creds.refresh(Request())
+        except Exception as exc:
+            raise CalendarError(f"токен не обновился: {exc}") from exc
         # Обновлённый токен обязательно сохранить: иначе после перезапуска
         # сервиса рефреш начнётся с нуля, а при отзыве старого всё встанет.
         self._token_file.write_text(creds.to_json(), encoding="utf-8")
@@ -168,8 +178,8 @@ class GoogleCalendar:
         её за него нельзя.
         """
         with self._lock:
-            service = self._get_service()
             try:
+                service = self._get_service()
                 existing = {
                     item.get("summary", ""): item.get("id", "")
                     for item in service.calendarList()
