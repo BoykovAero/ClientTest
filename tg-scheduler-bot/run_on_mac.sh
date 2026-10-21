@@ -29,7 +29,7 @@ command -v python3 >/dev/null || die \
 [[ -f "${SRC_DIR}/.env" ]] || die \
     "Нет файла .env в ${SRC_DIR}. Собери его: python3 setup_env.py (DEPLOY.md, шаги 1–4)."
 grep -q '^TELEGRAM_BOT_TOKEN=.\+' "${SRC_DIR}/.env" || die "В .env пуст TELEGRAM_BOT_TOKEN."
-grep -q '^ALLOWED_USER_ID=[0-9]\+' "${SRC_DIR}/.env" || die "В .env пуст или нечисловой ALLOWED_USER_ID."
+grep -Eq '^ALLOWED_USER_ID="?[0-9]+"?' "${SRC_DIR}/.env" || die "В .env пуст или нечисловой ALLOWED_USER_ID."
 grep -q '^OPENAI_API_KEY=.\+' "${SRC_DIR}/.env" || die "В .env пуст OPENAI_API_KEY."
 
 # Google: либо ключ сервисного аккаунта в .env, либо пара файлов OAuth.
