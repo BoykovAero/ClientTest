@@ -304,6 +304,17 @@ class GoogleCalendar:
         entries.sort(key=lambda entry: (entry.start is not None, entry.start or day_start))
         return entries
 
+    def list_category_day(self, category: str, day_start: datetime) -> list[CalendarEntry]:
+        """События одного направления за сутки. Для ежедневной сводки.
+
+        Читает ровно календарь направления (например «Учёба»), а не все
+        сразу: сводка по олимпиадам не должна мешаться с работой и бытом.
+        """
+        calendar_id = self.calendar_for(category)
+        entries = self._list_one(calendar_id, category, day_start)
+        entries.sort(key=lambda entry: (entry.start is not None, entry.start or day_start))
+        return entries
+
     def _list_one(
         self, calendar_id: str, category: str, day_start: datetime
     ) -> list[CalendarEntry]:

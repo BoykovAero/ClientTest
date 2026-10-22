@@ -21,7 +21,7 @@ from telegram.error import Conflict, TelegramError
 from telegram.ext import ContextTypes
 
 from bot.calendars.base import CalendarEntry, CalendarError, Event, SaveResult
-from bot.categories import CATEGORIES
+from bot.categories import CATEGORIES, STUDY
 from bot.copyday import CopyError, matches, parse_copy
 from bot.documents import DocumentError, extract_text, is_large, kind_of
 from bot.grid import ColumnChoiceNeeded
@@ -1160,6 +1160,39 @@ class SchedulerBot:
             logger.info("Отправлен ежедневный вопрос")
         except TelegramError as exc:
             logger.error("Не удалось отправить ежедневный вопрос: %s", exc)
+
+    # ─── ежедневная сводка по «Учёбе» ───────────────────────────────────────
+    async def daily_digest(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Шлёт список того, что сегодня по календарю «Учёба».
+
+        Ничего не меняет — только читает и отправляет. Отдельным сообщением
+        каждое утро: олимпиады и ИД одним списком, без разбиения.
+        """
+        day_start = datetime.now(self._config.timezone).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        try:
+            entries = await asyncio.to_thread(
+                self._google.list_category_day, STUDY, day_start
+            )
+        except CalendarError as exc:
+            logger.error("Сводка не собралась: %s", exc)
+            return
+
+        text = self._digest_text(entries, day_start)
+        try:
+            await context.bot.send_message(chat_id=self._config.allowed_user_id, text=text)
+            logger.info("Отправлена сводка на %s: %d событий", day_start.date(), len(entries))
+        except TelegramError as exc:
+            logger.error("Не удалось отправить сводку: %s", exc)
+
+    def _digest_text(self, entries: list[CalendarEntry], day_start: datetime) -> str:
+        header = f"Сегодня, {day_start:%d.%m} — олимпиады и ИД:"
+        if not entries:
+            return f"{header}\n\nНа сегодня ничего не запланировано."
+        lines = [header, ""]
+        lines += [f"• {entry.as_line()}" for entry in entries]
+        return "\n".join(lines)
 
     # ─── общий конвейер ─────────────────────────────────────────────────────
     async def _process(self, update: Update, text: str) -> None:

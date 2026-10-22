@@ -232,6 +232,20 @@ def _assemble(config: Config, openai_client, google: GoogleCalendar) -> Applicat
     application.job_queue.run_daily(
         scheduler_bot.daily_question, time=daily_at, name="daily-question"
     )
+
+    digest_at = time(
+        hour=config.digest_time.hour,
+        minute=config.digest_time.minute,
+        tzinfo=config.timezone,
+    )
+    application.job_queue.run_daily(
+        scheduler_bot.daily_digest, time=digest_at, name="daily-digest"
+    )
+    logger.info(
+        "Ежедневная сводка по «Учёбе» запланирована на %s %s",
+        digest_at.strftime("%H:%M"),
+        config.timezone_name,
+    )
     logger.info(
         "Ежедневный вопрос запланирован на %s %s",
         daily_at.strftime("%H:%M"),

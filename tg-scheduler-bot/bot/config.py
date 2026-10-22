@@ -53,6 +53,7 @@ class Config:
 
     timezone: ZoneInfo
     daily_prompt_time: time
+    digest_time: time
     default_event_minutes: int
 
     log_level: str
@@ -76,13 +77,13 @@ def _required(name: str, missing: list[str]) -> str:
     return value
 
 
-def _parse_time(raw: str, problems: list[str]) -> time:
+def _parse_time(raw: str, problems: list[str], name: str = "DAILY_PROMPT_TIME") -> time:
     """'08:45' -> time(8, 45)."""
     try:
         hours, minutes = raw.split(":")
         return time(hour=int(hours), minute=int(minutes))
     except (ValueError, AttributeError):
-        problems.append(f"DAILY_PROMPT_TIME: ожидается ЧЧ:ММ, получено {raw!r}")
+        problems.append(f"{name}: ожидается ЧЧ:ММ, получено {raw!r}")
         return time(8, 45)
 
 
@@ -225,6 +226,11 @@ def load_config(env_file: Path | None = None) -> Config:
     daily_prompt_time = _parse_time(
         os.environ.get("DAILY_PROMPT_TIME", "08:45").strip(), problems
     )
+    # Ежедневная сводка по «Учёбе» (олимпиады и ИД). По умолчанию 09:00 —
+    # через пять минут после того, как рутина в 08:55 обновит календарь.
+    digest_time = _parse_time(
+        os.environ.get("DAILY_DIGEST_TIME", "09:00").strip(), problems, "DAILY_DIGEST_TIME"
+    )
     default_event_minutes = _parse_positive_int(
         "DEFAULT_EVENT_MINUTES",
         os.environ.get("DEFAULT_EVENT_MINUTES", "60").strip(),
@@ -294,6 +300,7 @@ def load_config(env_file: Path | None = None) -> Config:
         google_calendar_id=google_calendar_id,
         timezone=timezone,
         daily_prompt_time=daily_prompt_time,
+        digest_time=digest_time,
         default_event_minutes=default_event_minutes,
         log_level=os.environ.get("LOG_LEVEL", "INFO").strip().upper() or "INFO",
         memory_file=memory_file,
