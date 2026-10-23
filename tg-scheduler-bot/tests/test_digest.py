@@ -1,0 +1,219 @@
+"""Ежедневная сводка по «Учёбе»: что сегодня по олимпиадам и ИД.
+
+Бот ничего не меняет в календаре — только читает направление «Учёба» за
+сегодня и шлёт список одним сообщением.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from types import SimpleNamespace
+from zoneinfo import ZoneInfo
+
+from bot.calendars.base import CalendarEntry, CalendarError
+from bot.categories import STUDY
+from bot.telegram_bot import SchedulerBot
+
+MSK = ZoneInfo("Europe/Moscow")
+
+
+def moment(hour: int, minute: int = 0) -> datetime:
+    return datetime(2026, 10, 22, hour, minute, tzinfo=MSK)
+
+
+ROUND = CalendarEntry(
+    event_id="e1", when="10:00", title="Физтех (физика) — финал",
+    start=moment(10), end=moment(13),
+)
+WINDOW = CalendarEntry(event_id="e2", when="весь день", title="Innopolis Open — регистрация")
+# Олимпиада/ИД — всегда на весь день (start/end не заданы).
+OLYMP = CalendarEntry(event_id="o1", when="весь день", title="Физтех — инженерное дело (окно)")
+
+
+class FakeGoogle:
+    def __init__(self, entries=(), fail=False) -> None:
+        self._entries = list(entries)
+        self._fail = fail
+        self.asked: list = []
+
+    def list_category_day(self, category, day_start):
+        self.asked.append((category, day_start))
+        if self._fail:
+            raise CalendarError("403: нет доступа")
+        return list(self._entries)
+
+
+class FakeBot:
+    def __init__(self) -> None:
+        self.sent: list[tuple] = []
+
+    async def send_message(self, chat_id, text, **kwargs):
+        self.sent.append((chat_id, text))
+
+
+def make_bot(google) -> SchedulerBot:
+    return SchedulerBot(
+        config=SimpleNamespace(timezone=MSK, allowed_user_id=777),
+        parser=object(), transcriber=object(), image_reader=object(),
+        openai_client=object(), google=google, icloud=None,
+    )
+
+
+def context(bot: FakeBot) -> SimpleNamespace:
+    return SimpleNamespace(bot=bot)
+
+
+# ─── формат ─────────────────────────────────────────────────────────────
+
+
+def test_svodka_odnim_spiskom_bez_deleniya():
+    bot = make_bot(FakeGoogle())
+    text = bot._digest_text([OLYMP, WINDOW], moment(0))
+    assert "Физтех — инженерное дело (окно)" in text
+    assert "Innopolis Open — регистрация" in text
+    # Ровно один заголовок, без секций «олимпиады»/«ИД» по отдельности.
+    assert text.count("•") == 2
+
+
+async def test_pochasovye_dela_v_svodku_ne_popadayut():
+    """Личные дела по часам (Марвин, аудикнига) — не олимпиады и не ИД."""
+    google = FakeGoogle([ROUND, WINDOW, OLYMP])
+    fake = FakeBot()
+
+    await make_bot(google).daily_digest(context(fake))
+
+    text = fake.sent[0][1]
+    assert "Физтех — физика — финал" not in text  # почасовое — отброшено
+    assert "Физтех (физика) — финал" not in text
+    assert "Innopolis Open — регистрация" in text  # весь день — осталось
+    assert "Физтех — инженерное дело (окно)" in text
+
+
+async def test_tolko_pochasovye_schitayutsya_pustym_dnyom():
+    """Если на весь день ничего нет — сводка пустая, хоть дела и есть."""
+    fake = FakeBot()
+    await make_bot(FakeGoogle([ROUND])).daily_digest(context(fake))
+    assert "ничего не запланировано" in fake.sent[0][1]
+
+
+def test_pustoy_den_tak_i_pishetsya():
+    text = make_bot(FakeGoogle())._digest_text([], moment(0))
+    assert "ничего не запланировано" in text
+
+
+# ─── отправка ───────────────────────────────────────────────────────────
+
+
+async def test_svodka_chitaet_uchyobu_i_shlyot_vladeltsu():
+    google = FakeGoogle([OLYMP])
+    bot = make_bot(google)
+    fake = FakeBot()
+
+    await bot.daily_digest(context(fake))
+
+    assert google.asked[0][0] == STUDY
+    assert len(fake.sent) == 1
+    chat_id, text = fake.sent[0]
+    assert chat_id == 777
+    assert "Физтех" in text
+
+
+async def test_pustoy_den_vsyo_ravno_otpravlyaetsya():
+    """Сводка приходит каждый день — так видно, что бот жив."""
+    fake = FakeBot()
+    await make_bot(FakeGoogle([])).daily_digest(context(fake))
+    assert len(fake.sent) == 1
+    assert "ничего" in fake.sent[0][1]
+
+
+async def test_otkaz_kalendarya_ne_ronyaet_i_ne_shlyot():
+    fake = FakeBot()
+    await make_bot(FakeGoogle(fail=True)).daily_digest(context(fake))
+    assert fake.sent == []
+
+
+async def test_nichego_ne_menyaet_v_kalendare():
+    """У сводки нет ни create, ни patch — только чтение одного дня."""
+    google = FakeGoogle([ROUND, WINDOW])
+    await make_bot(google).daily_digest(context(FakeBot()))
+    # Единственное обращение к календарю — чтение «Учёбы» за день.
+    assert len(google.asked) == 1
+
+
+# ─── досыл при запуске ───────────────────────────────────────────────────
+
+from datetime import time as _time  # noqa: E402
+
+
+def make_bot_at(google, now: datetime, marker=None) -> SchedulerBot:
+    bot = SchedulerBot(
+        config=SimpleNamespace(
+            timezone=MSK, allowed_user_id=777,
+            digest_time=_time(9, 0), digest_marker=marker,
+        ),
+        parser=object(), transcriber=object(), image_reader=object(),
+        openai_client=object(), google=google, icloud=None,
+    )
+    return bot
+
+
+class FrozenNow:
+    """Подменяет datetime.now в модуле на заданный момент."""
+
+    def __init__(self, moment):
+        self._moment = moment
+
+    def __enter__(self):
+        import bot.telegram_bot as tb
+        self._real = tb.datetime
+        outer = self
+
+        class _DT(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return outer._moment
+
+        tb.datetime = _DT
+        return self
+
+    def __exit__(self, *a):
+        import bot.telegram_bot as tb
+        tb.datetime = self._real
+
+
+async def test_dosyl_posle_devyati_esli_ne_otpravlyali():
+    google = FakeGoogle([OLYMP])
+    fake = FakeBot()
+    bot = make_bot_at(google, moment(9, 50))
+    with FrozenNow(moment(9, 50)):
+        await bot.catch_up_digest(context(fake))
+    assert len(fake.sent) == 1  # проспали 09:00 — досылает
+
+
+async def test_dosyl_molchit_do_devyati():
+    fake = FakeBot()
+    bot = make_bot_at(FakeGoogle([OLYMP]), moment(7, 0))
+    with FrozenNow(moment(7, 0)):
+        await bot.catch_up_digest(context(fake))
+    assert fake.sent == []  # ещё рано — сработает обычная задача в 09:00
+
+
+async def test_dosyl_ne_povtoryaet_za_den():
+    fake = FakeBot()
+    bot = make_bot_at(FakeGoogle([OLYMP]), moment(9, 50))
+    with FrozenNow(moment(9, 50)):
+        await bot.catch_up_digest(context(fake))   # первый — отправит
+        await bot.catch_up_digest(context(fake))   # второй — уже нет
+    assert len(fake.sent) == 1
+
+
+async def test_otmetka_perezhivaet_perezapusk(tmp_path):
+    marker = tmp_path / "state" / "last_digest.txt"
+    with FrozenNow(moment(9, 50)):
+        first = make_bot_at(FakeGoogle([OLYMP]), moment(9, 50), marker)
+        await first.catch_up_digest(context(FakeBot()))
+        # Новый процесс (перезапуск): отметку читает с диска и молчит.
+        second = make_bot_at(FakeGoogle([OLYMP]), moment(9, 50), marker)
+        fake = FakeBot()
+        await second.catch_up_digest(context(fake))
+    assert fake.sent == []

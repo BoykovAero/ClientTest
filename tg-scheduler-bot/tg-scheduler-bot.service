@@ -1,0 +1,42 @@
+[Unit]
+Description=TG Scheduler Bot (ежедневный планировщик: Telegram -> Google Calendar + iCloud)
+Documentation=https://github.com/BoykovAero/tg-scheduler-bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# ВНИМАНИЕ: deploy.sh подставляет сюда реальные значения. Если правишь вручную —
+# User должен совпадать с владельцем каталога, WorkingDirectory — с путём установки.
+User=botuser
+Group=botuser
+WorkingDirectory=/opt/tg-scheduler-bot
+
+# .env читается самим приложением через python-dotenv из WorkingDirectory,
+# поэтому EnvironmentFile здесь намеренно не используется (systemd иначе
+# по-своему разбирает кавычки и ломает пароли со спецсимволами).
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/tg-scheduler-bot/venv/bin/python -m bot
+
+# Перезапуск при падении и после перезагрузки сервера
+Restart=always
+RestartSec=10
+# Не уходить в бесконечный цикл рестартов при системной ошибке
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# Логи -> journalctl -u tg-scheduler-bot
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tg-scheduler-bot
+
+# Минимальное ужесточение прав
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/tg-scheduler-bot
+
+[Install]
+WantedBy=multi-user.target
