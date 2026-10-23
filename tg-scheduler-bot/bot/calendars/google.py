@@ -10,6 +10,7 @@ OAuth здесь не проходится: бот только читает г�
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 from datetime import datetime, timedelta
@@ -46,6 +47,7 @@ class GoogleCalendar:
         timezone_name: str,
         token_file: Path | None = None,
         service_account_info: dict | None = None,
+        category_cache: Path | None = None,
     ) -> None:
         if token_file is None and service_account_info is None:
             raise ValueError("нужен либо token_file, либо service_account_info")
@@ -54,11 +56,41 @@ class GoogleCalendar:
         self._calendar_id = calendar_id
         self._timezone_name = timezone_name
         # Направление -> идентификатор его календаря. Заполняется при старте
-        # через ensure_calendars; пока пусто, всё идёт в основной календарь.
-        self._category_calendars: dict[str, str] = {}
+        # через ensure_calendars и сохраняется на диск. Загружаем прошлую
+        # привязку сразу: если сеть при старте оборвётся и ensure не пройдёт,
+        # бот всё равно пишет и читает события в правильных календарях, а не
+        # сваливает всё в основной.
+        self._category_cache = category_cache
+        self._category_calendars: dict[str, str] = self._load_category_cache()
         self._lock = threading.Lock()
         self._credentials_cache = None
         self._service = None
+
+    def _load_category_cache(self) -> dict[str, str]:
+        if self._category_cache is None or not self._category_cache.exists():
+            return {}
+        try:
+            data = json.loads(self._category_cache.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            logger.warning("Google: привязка календарей не прочиталась (%s)", exc)
+            return {}
+        if isinstance(data, dict):
+            pairs = {str(k): str(v) for k, v in data.items() if v}
+            if pairs:
+                logger.info("Google: привязка календарей из кэша — %s", ", ".join(sorted(pairs)))
+            return pairs
+        return {}
+
+    def _save_category_cache(self) -> None:
+        if self._category_cache is None:
+            return
+        try:
+            self._category_cache.parent.mkdir(parents=True, exist_ok=True)
+            self._category_cache.write_text(
+                json.dumps(self._category_calendars, ensure_ascii=False), encoding="utf-8"
+            )
+        except OSError as exc:
+            logger.warning("Google: привязку календарей не записать (%s)", exc)
 
     @property
     def uses_service_account(self) -> bool:
@@ -220,6 +252,7 @@ class GoogleCalendar:
                 self._share(service, calendar_id, share_with)
 
             self._category_calendars = found
+            self._save_category_cache()
             return dict(found)
 
     @staticmethod

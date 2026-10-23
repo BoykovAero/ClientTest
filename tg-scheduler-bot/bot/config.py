@@ -59,6 +59,7 @@ class Config:
     log_level: str
     memory_file: Path
     digest_marker: Path
+    category_cache: Path
 
     @property
     def timezone_name(self) -> str:
@@ -278,6 +279,9 @@ def load_config(env_file: Path | None = None) -> Config:
     # Дата последней отправленной сводки — чтобы «досыл» при запуске не
     # повторял её на каждом перезапуске, а слал только если пропустили.
     digest_marker = state_dir / "last_digest.txt"
+    # Привязка «направление -> календарь»: пережив сетевой сбой при старте,
+    # бот не свалит олимпиады и дела в основной календарь.
+    category_cache = state_dir / "calendars.json"
 
     if missing:
         problems.insert(0, "Не заданы обязательные переменные: " + ", ".join(missing))
@@ -309,4 +313,5 @@ def load_config(env_file: Path | None = None) -> Config:
         log_level=os.environ.get("LOG_LEVEL", "INFO").strip().upper() or "INFO",
         memory_file=memory_file,
         digest_marker=digest_marker,
+        category_cache=category_cache,
     )

@@ -95,6 +95,7 @@ def build_application(config: Config) -> Application:
         timezone_name=config.timezone_name,
         token_file=config.google_token_file,
         service_account_info=config.google_service_account_info,
+        category_cache=config.category_cache,
     )
     _prepare_calendars(config, google)
     return _assemble(config, openai_client, google)
