@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from io import BytesIO
 from time import monotonic
 
@@ -106,6 +106,10 @@ class SchedulerBot:
         self._awaiting: dict[int, tuple[str, str, str, object]] = {}
         # Таблицы и файлы, из которых ещё предстоит выбрать столбец.
         self._pending_sources: dict[str, tuple] = {}
+        # Отметка «в какой день сводка уже уходила»: файл в каталоге данных.
+        # По ней «досыл» при запуске не повторяет сводку на каждом рестарте.
+        self._digest_marker = getattr(config, "digest_marker", None)
+        self._digest_sent_on = self._read_digest_marker()
 
     # ─── авторизация ────────────────────────────────────────────────────────
     def _authorized(self, update: Update) -> bool:
@@ -1185,6 +1189,46 @@ class SchedulerBot:
             logger.info("Отправлена сводка на %s: %d событий", day_start.date(), len(entries))
         except TelegramError as exc:
             logger.error("Не удалось отправить сводку: %s", exc)
+            return
+        # Запоминаем только после удачной отправки: если связь оборвалась,
+        # «досыл» при следующем запуске попробует снова.
+        self._mark_digest_sent(day_start.date().isoformat())
+
+    async def catch_up_digest(self, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Досылает сводку, если сегодняшние 09:00 прошли, а её не было.
+
+        Нужна для ноутбука: в 09:00 он мог спать, и задача по расписанию не
+        сработала. Проснулся позже — сводка уходит при запуске. На повторных
+        перезапусках за день отметка не даёт отправить дважды.
+        """
+        now = datetime.now(self._config.timezone)
+        digest_time = getattr(self._config, "digest_time", time(9, 0))
+        if now.timetz().replace(tzinfo=None) < digest_time:
+            return  # до 09:00 — досылать нечего, сработает обычная задача
+        if self._digest_sent_on == now.date().isoformat():
+            return  # уже отправляли сегодня
+        logger.info("Сводку в %s пропустили — досылаю при запуске", digest_time.strftime("%H:%M"))
+        await self.daily_digest(context)
+
+    def _read_digest_marker(self) -> str:
+        if self._digest_marker is None:
+            return ""
+        try:
+            return self._digest_marker.read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
+
+    def _mark_digest_sent(self, day: str) -> None:
+        self._digest_sent_on = day
+        if self._digest_marker is None:
+            return
+        try:
+            self._digest_marker.parent.mkdir(parents=True, exist_ok=True)
+            self._digest_marker.write_text(day, encoding="utf-8")
+        except OSError as exc:
+            # Не беда: без файла «досыл» разве что повторит сводку после
+            # перезапуска, но не промолчит.
+            logger.warning("Отметка сводки не записалась: %s", exc)
 
     def _digest_text(self, entries: list[CalendarEntry], day_start: datetime) -> str:
         header = f"Сегодня, {day_start:%d.%m} — олимпиады и ИД:"

@@ -115,3 +115,82 @@ async def test_nichego_ne_menyaet_v_kalendare():
     await make_bot(google).daily_digest(context(FakeBot()))
     # Единственное обращение к календарю — чтение «Учёбы» за день.
     assert len(google.asked) == 1
+
+
+# ─── досыл при запуске ───────────────────────────────────────────────────
+
+from datetime import time as _time  # noqa: E402
+
+
+def make_bot_at(google, now: datetime, marker=None) -> SchedulerBot:
+    bot = SchedulerBot(
+        config=SimpleNamespace(
+            timezone=MSK, allowed_user_id=777,
+            digest_time=_time(9, 0), digest_marker=marker,
+        ),
+        parser=object(), transcriber=object(), image_reader=object(),
+        openai_client=object(), google=google, icloud=None,
+    )
+    return bot
+
+
+class FrozenNow:
+    """Подменяет datetime.now в модуле на заданный момент."""
+
+    def __init__(self, moment):
+        self._moment = moment
+
+    def __enter__(self):
+        import bot.telegram_bot as tb
+        self._real = tb.datetime
+        outer = self
+
+        class _DT(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return outer._moment
+
+        tb.datetime = _DT
+        return self
+
+    def __exit__(self, *a):
+        import bot.telegram_bot as tb
+        tb.datetime = self._real
+
+
+async def test_dosyl_posle_devyati_esli_ne_otpravlyali():
+    google = FakeGoogle([ROUND])
+    fake = FakeBot()
+    bot = make_bot_at(google, moment(9, 50))
+    with FrozenNow(moment(9, 50)):
+        await bot.catch_up_digest(context(fake))
+    assert len(fake.sent) == 1  # проспали 09:00 — досылает
+
+
+async def test_dosyl_molchit_do_devyati():
+    fake = FakeBot()
+    bot = make_bot_at(FakeGoogle([ROUND]), moment(7, 0))
+    with FrozenNow(moment(7, 0)):
+        await bot.catch_up_digest(context(fake))
+    assert fake.sent == []  # ещё рано — сработает обычная задача в 09:00
+
+
+async def test_dosyl_ne_povtoryaet_za_den():
+    fake = FakeBot()
+    bot = make_bot_at(FakeGoogle([ROUND]), moment(9, 50))
+    with FrozenNow(moment(9, 50)):
+        await bot.catch_up_digest(context(fake))   # первый — отправит
+        await bot.catch_up_digest(context(fake))   # второй — уже нет
+    assert len(fake.sent) == 1
+
+
+async def test_otmetka_perezhivaet_perezapusk(tmp_path):
+    marker = tmp_path / "state" / "last_digest.txt"
+    with FrozenNow(moment(9, 50)):
+        first = make_bot_at(FakeGoogle([ROUND]), moment(9, 50), marker)
+        await first.catch_up_digest(context(FakeBot()))
+        # Новый процесс (перезапуск): отметку читает с диска и молчит.
+        second = make_bot_at(FakeGoogle([ROUND]), moment(9, 50), marker)
+        fake = FakeBot()
+        await second.catch_up_digest(context(fake))
+    assert fake.sent == []

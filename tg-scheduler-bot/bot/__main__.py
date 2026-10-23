@@ -241,6 +241,12 @@ def _assemble(config: Config, openai_client, google: GoogleCalendar) -> Applicat
     application.job_queue.run_daily(
         scheduler_bot.daily_digest, time=digest_at, name="daily-digest"
     )
+    # Досыл: вскоре после запуска проверяем, не проспали ли сегодняшнюю
+    # сводку (ноутбук мог спать в 09:00). Задержка — чтобы поллинг успел
+    # подняться и связь с Телеграмом появилась.
+    application.job_queue.run_once(
+        scheduler_bot.catch_up_digest, when=20, name="digest-catch-up"
+    )
     logger.info(
         "Ежедневная сводка по «Учёбе» запланирована на %s %s",
         digest_at.strftime("%H:%M"),

@@ -58,6 +58,7 @@ class Config:
 
     log_level: str
     memory_file: Path
+    digest_marker: Path
 
     @property
     def timezone_name(self) -> str:
@@ -274,6 +275,9 @@ def load_config(env_file: Path | None = None) -> Config:
     # это подключённый том, иначе файл исчезает вместе с контейнером.
     state_dir = Path(os.environ.get("STATE_DIR", "").strip() or BASE_DIR / "data")
     memory_file = state_dir / "memory.json"
+    # Дата последней отправленной сводки — чтобы «досыл» при запуске не
+    # повторял её на каждом перезапуске, а слал только если пропустили.
+    digest_marker = state_dir / "last_digest.txt"
 
     if missing:
         problems.insert(0, "Не заданы обязательные переменные: " + ", ".join(missing))
@@ -304,4 +308,5 @@ def load_config(env_file: Path | None = None) -> Config:
         default_event_minutes=default_event_minutes,
         log_level=os.environ.get("LOG_LEVEL", "INFO").strip().upper() or "INFO",
         memory_file=memory_file,
+        digest_marker=digest_marker,
     )
