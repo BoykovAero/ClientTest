@@ -26,6 +26,8 @@ ROUND = CalendarEntry(
     start=moment(10), end=moment(13),
 )
 WINDOW = CalendarEntry(event_id="e2", when="весь день", title="Innopolis Open — регистрация")
+# Олимпиада/ИД — всегда на весь день (start/end не заданы).
+OLYMP = CalendarEntry(event_id="o1", when="весь день", title="Физтех — инженерное дело (окно)")
 
 
 class FakeGoogle:
@@ -66,11 +68,32 @@ def context(bot: FakeBot) -> SimpleNamespace:
 
 def test_svodka_odnim_spiskom_bez_deleniya():
     bot = make_bot(FakeGoogle())
-    text = bot._digest_text([ROUND, WINDOW], moment(0))
-    assert "Физтех (физика) — финал" in text
+    text = bot._digest_text([OLYMP, WINDOW], moment(0))
+    assert "Физтех — инженерное дело (окно)" in text
     assert "Innopolis Open — регистрация" in text
     # Ровно один заголовок, без секций «олимпиады»/«ИД» по отдельности.
     assert text.count("•") == 2
+
+
+async def test_pochasovye_dela_v_svodku_ne_popadayut():
+    """Личные дела по часам (Марвин, аудикнига) — не олимпиады и не ИД."""
+    google = FakeGoogle([ROUND, WINDOW, OLYMP])
+    fake = FakeBot()
+
+    await make_bot(google).daily_digest(context(fake))
+
+    text = fake.sent[0][1]
+    assert "Физтех — физика — финал" not in text  # почасовое — отброшено
+    assert "Физтех (физика) — финал" not in text
+    assert "Innopolis Open — регистрация" in text  # весь день — осталось
+    assert "Физтех — инженерное дело (окно)" in text
+
+
+async def test_tolko_pochasovye_schitayutsya_pustym_dnyom():
+    """Если на весь день ничего нет — сводка пустая, хоть дела и есть."""
+    fake = FakeBot()
+    await make_bot(FakeGoogle([ROUND])).daily_digest(context(fake))
+    assert "ничего не запланировано" in fake.sent[0][1]
 
 
 def test_pustoy_den_tak_i_pishetsya():
@@ -82,7 +105,7 @@ def test_pustoy_den_tak_i_pishetsya():
 
 
 async def test_svodka_chitaet_uchyobu_i_shlyot_vladeltsu():
-    google = FakeGoogle([ROUND])
+    google = FakeGoogle([OLYMP])
     bot = make_bot(google)
     fake = FakeBot()
 
@@ -159,7 +182,7 @@ class FrozenNow:
 
 
 async def test_dosyl_posle_devyati_esli_ne_otpravlyali():
-    google = FakeGoogle([ROUND])
+    google = FakeGoogle([OLYMP])
     fake = FakeBot()
     bot = make_bot_at(google, moment(9, 50))
     with FrozenNow(moment(9, 50)):
@@ -169,7 +192,7 @@ async def test_dosyl_posle_devyati_esli_ne_otpravlyali():
 
 async def test_dosyl_molchit_do_devyati():
     fake = FakeBot()
-    bot = make_bot_at(FakeGoogle([ROUND]), moment(7, 0))
+    bot = make_bot_at(FakeGoogle([OLYMP]), moment(7, 0))
     with FrozenNow(moment(7, 0)):
         await bot.catch_up_digest(context(fake))
     assert fake.sent == []  # ещё рано — сработает обычная задача в 09:00
@@ -177,7 +200,7 @@ async def test_dosyl_molchit_do_devyati():
 
 async def test_dosyl_ne_povtoryaet_za_den():
     fake = FakeBot()
-    bot = make_bot_at(FakeGoogle([ROUND]), moment(9, 50))
+    bot = make_bot_at(FakeGoogle([OLYMP]), moment(9, 50))
     with FrozenNow(moment(9, 50)):
         await bot.catch_up_digest(context(fake))   # первый — отправит
         await bot.catch_up_digest(context(fake))   # второй — уже нет
@@ -187,10 +210,10 @@ async def test_dosyl_ne_povtoryaet_za_den():
 async def test_otmetka_perezhivaet_perezapusk(tmp_path):
     marker = tmp_path / "state" / "last_digest.txt"
     with FrozenNow(moment(9, 50)):
-        first = make_bot_at(FakeGoogle([ROUND]), moment(9, 50), marker)
+        first = make_bot_at(FakeGoogle([OLYMP]), moment(9, 50), marker)
         await first.catch_up_digest(context(FakeBot()))
         # Новый процесс (перезапуск): отметку читает с диска и молчит.
-        second = make_bot_at(FakeGoogle([ROUND]), moment(9, 50), marker)
+        second = make_bot_at(FakeGoogle([OLYMP]), moment(9, 50), marker)
         fake = FakeBot()
         await second.catch_up_digest(context(fake))
     assert fake.sent == []

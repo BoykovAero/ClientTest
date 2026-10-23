@@ -1167,10 +1167,12 @@ class SchedulerBot:
 
     # ─── ежедневная сводка по «Учёбе» ───────────────────────────────────────
     async def daily_digest(self, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Шлёт список того, что сегодня по календарю «Учёба».
+        """Шлёт список олимпиад и ИД, идущих сегодня по календарю «Учёба».
 
-        Ничего не меняет — только читает и отправляет. Отдельным сообщением
-        каждое утро: олимпиады и ИД одним списком, без разбиения.
+        Ничего не меняет — только читает и отправляет. В сводку идут лишь
+        события на весь день: олимпиады и ИД ставятся именно так (тур,
+        окно регистрации, дедлайн). Личные дела по часам (Марвин,
+        аудикнига) сюда не попадают — это не рассылка расписания.
         """
         day_start = datetime.now(self._config.timezone).replace(
             hour=0, minute=0, second=0, microsecond=0
@@ -1183,10 +1185,16 @@ class SchedulerBot:
             logger.error("Сводка не собралась: %s", exc)
             return
 
-        text = self._digest_text(entries, day_start)
+        # Событие на весь день — у него нет времени начала. Почасовые дела
+        # отбрасываем: сводка про олимпиады и ИД, а не про весь день.
+        olympiads = [entry for entry in entries if entry.start is None]
+
+        text = self._digest_text(olympiads, day_start)
         try:
             await context.bot.send_message(chat_id=self._config.allowed_user_id, text=text)
-            logger.info("Отправлена сводка на %s: %d событий", day_start.date(), len(entries))
+            logger.info(
+                "Отправлена сводка на %s: %d из %d", day_start.date(), len(olympiads), len(entries)
+            )
         except TelegramError as exc:
             logger.error("Не удалось отправить сводку: %s", exc)
             return
